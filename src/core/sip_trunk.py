@@ -191,7 +191,7 @@ class SIPTrunk:
                 self._last_keepalive = datetime.now()
                 
                 # 7. Registro inicial (RFC 5626 Sección 5.2)
-                if self.config.get('auto_register', True):
+                if self.config.get('auto_register', False):
                     self._send_initial_register()
                 
                 logger.info(f"Conexión establecida (Intento {attempt+1})")
@@ -214,23 +214,42 @@ class SIPTrunk:
 
     def _send_initial_register(self):
         """Envía REGISTER inicial según RFC 5626 Sección 5.2"""
-        register_msg = (
-            f"REGISTER sip:{self.config['domain']} SIP/2.0\r\n"
-            f"Via: SIP/2.0/TCP {self.config['local_ip']}:{self.config['local_port']};branch={self._generate_branch()}\r\n"
-            f"From: <sip:{self.config['user']}@{self.config['domain']}>;tag={uuid.uuid4().hex[:8]}\r\n"
-            f"To: <sip:{self.config['user']}@{self.config['domain']}>\r\n"
-            f"Call-ID: {uuid.uuid4()}@{self.config['local_ip']}\r\n"
-            f"CSeq: 1 REGISTER\r\n"
-            f"Contact: <sip:{self.config['local_ip']}:{self.config['local_port']};transport=tcp>;"
-            f"reg-id={self.config.get('reg_id', 1)};"
-            f"+sip.instance=\"{self._instance_id}\";expires=3600\r\n"
-            f"Supported: outbound, path\r\n"
-            f"Flow-Token: {self._flow_token}\r\n"
-            f"Max-Forwards: 70\r\n"
-            f"Content-Length: 0\r\n\r\n"
-        )
-        self._connection.sendall(register_msg.encode())
-        logger.debug("REGISTER inicial enviado")
+        try:
+            # Verificar parámetros requeridos
+            if 'domain' not in self.config or 'user' not in self.config:
+                logger.error("Configuración incompleta para REGISTER: faltan 'domain' o 'user'")
+                raise ValueError("Parámetros 'domain' y 'user' son requeridos para REGISTER")
+
+            register_msg = (
+                f"REGISTER sip:{self.config['domain']} SIP/2.0\r\n"
+                f"Via: SIP/2.0/TCP {self.config['local_ip']}:{self.config['local_port']};"
+                f"branch={self._generate_branch()}\r\n"
+                f"From: <sip:{self.config['user']}@{self.config['domain']}>;"
+                f"tag={uuid.uuid4().hex[:8]}\r\n"
+                f"To: <sip:{self.config['user']}@{self.config['domain']}>\r\n"
+                f"Call-ID: {uuid.uuid4()}@{self.config['local_ip']}\r\n"
+                f"CSeq: 1 REGISTER\r\n"
+                f"Contact: <sip:{self.config['local_ip']}:{self.config['local_port']};transport=tcp>;"
+                f"reg-id={self.config.get('reg_id', 1)};"
+                f"+sip.instance=\"{self._instance_id}\";expires=3600\r\n"
+                f"Supported: outbound, path\r\n"
+                f"Flow-Token: {self._flow_token}\r\n"
+                f"Max-Forwards: 70\r\n"
+                f"Content-Length: 0\r\n\r\n"
+            )
+            
+            self._connection.sendall(register_msg.encode())
+            logger.debug("REGISTER inicial enviado")
+            
+        except KeyError as e:
+            logger.error(f"Error en configuración: Parámetro faltante {str(e)}")
+            raise
+        except socket.error as e:
+            logger.error(f"Error de conexión al enviar REGISTER: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error inesperado en registro inicial: {str(e)}")
+            raise
 
     def _generate_branch(self) -> str:
         """Genera parámetro branch según RFC 3261 Sección 8.1.1.7"""
@@ -243,18 +262,17 @@ class SIPTrunk:
             "ob"
 
     def maintain_connection(self):
-        """Mantiene la conexión TCP activa."""
         try:
             if not self.is_connected:
-                logger.debug("Conexión perdida, intentando reconectar")
-                return self.connect()
+                if self._reconnect_attempts < self._max_reconnect_attempts:
+                    if self.connect():
+                        self._reconnect_attempts = 0
+                        return True
+                return False
 
-            # Mantener conexión mediante keepalive
-            logger.debug("Enviando keepalive")
-            self._connection.send(b"\r\n", socket.MSG_DONTWAIT)
             return True
-        except socket.error as e:
-            logger.debug(f"Error en keepalive: {e}")
+            
+        except socket.error:
             return self._handle_reconnection()
         
     def _handle_reconnection(self):
@@ -419,21 +437,26 @@ class SIPTrunk:
 
     
     def handle_incoming_message(self, message: str) -> bool:
-        """
-        Maneja mensajes SIP entrantes.
-        Retorna True si se manejó correctamente.
-        """
         try:
+            if isinstance(message, bytes):
+                message = message.decode('utf-8', errors='ignore')
+                
             if "OPTIONS" in message.split('\r\n')[0]:
-                # Es un mensaje OPTIONS
                 self.stats['options_received'] += 1
                 response = self._create_response_to_options(message)
+                
                 if response and self._connection:
-                    self._connection.sendall(response.encode())
-                    self.stats['ok_sent'] += 1
-                    print(f"Debug: Respuesta 200 OK enviada manteniendo Call-ID y CSeq")
-                    return True
-                    
+                    try:
+                        response_bytes = response.encode('utf-8')
+                        self._connection.sendall(response_bytes)
+                        self.stats['ok_sent'] += 1
+                        print(f"Debug: Mensaje SIP recibido y procesado: {message[:50]}...")
+                        return True
+                    except socket.error as e:
+                        print(f"Error enviando respuesta: {e}")
+                        self._handle_connection_error()
+                        return False
+                        
             return False
             
         except Exception as e:
@@ -493,38 +516,32 @@ class SIPTrunk:
     # Métodos de manejo de mensajes TCP
 
     def _receive_response(self, buffer_size: int = 4096) -> Optional[str]:
-        """Recibe y procesa respuesta SIP manteniendo la conexión."""
-        buffer = ""
+        buffer = b""
         start_time = time.time()
-        timeout = self.config.get('timeout', 5)
+        timeout = self.config.get('timeout', 10)
         
         try:
+            self._connection.settimeout(timeout/2)
+            
             while time.time() - start_time < timeout:
                 try:
-                    data = self._connection.recv(buffer_size)
-                    if not data:
-                        print("Debug: Conexión cerrada limpiamente por el peer")
-                        self._handle_connection_error()
-                        return None
+                    chunk = self._connection.recv(buffer_size)
+                    if not chunk:
+                        continue
                     
-                    buffer += data.decode('utf-8', errors='ignore')
-                    
-                    # Verificar si tenemos un mensaje SIP completo
-                    if "\r\n\r\n" in buffer:
-                        return buffer
+                    buffer += chunk
+                    if b"\r\n\r\n" in buffer:
+                        return buffer.decode('utf-8')
                     
                 except socket.timeout:
                     continue
-                    
-            print(f"Debug: Timeout esperando respuesta completa ({timeout}s)")
-            self.stats['timeouts'] += 1
+                
             return None
             
         except socket.error as e:
             print(f"Debug: Error en socket durante recepción: {e}")
-            self._handle_connection_error()
             return None
-        
+            
 
     @property
     def is_connected(self) -> bool:
