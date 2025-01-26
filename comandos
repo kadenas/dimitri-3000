@@ -1,0 +1,305 @@
+COMANDOS UTILES 
+
+python -m src
+
+source venv/bin/activate
+
+deactivate
+
+
+
+
+Excelente. Vamos a investigar y diseñar una solución más robusta basada en los estándares.
+
+RFC Principales a considerar:
+
+RFC 5626: Gestión de conexiones TCP persistentes en SIP
+RFC 5923: Connection Reuse in SIP
+RFC 4028: Session Timers in SIP (relacionado con keepalive)
+RFC 3261: SIP base protocol (sección 18 sobre TCP)
+
+
+Puntos clave a implementar:
+
+Conexión TCP persistente como conexión principal
+Mecanismo de detección de caída de conexión
+Reconexión automática
+Keepalive basado en OPTIONS
+Gestión de estados del trunk (up/down)
+
+
+
+Propongo que empecemos por:
+
+Documentarnos bien sobre los RFCs
+Diseñar la nueva arquitectura de conexiones
+Implementar paso a paso
+
+¿Por cuál aspecto prefieres que empecemos? ¿Quizás por el manejo de la conexión TCP persistente?
+
+
+
+
+
+
+
+
+
+####################################################################################################
+
+
+
+
+
+
+Me gustaría ajustar el funcionamiento del led y la latencia.
+
+Me gustaria que solo se pusiera el led en verde cuando se levante el sip trunk
+
+En Latencia, necesito que nos marque el tiempo de respuesta desde que se envia el OPTIONS hasta que recibimos respuesta.
+
+También quiero implementar un botón para resetar los contadores
+
+Necesitas que te pase algun fichero 
+
+RFC 5626 tcp control 
+
+RFC 3261 SIP
+
+sip_monitor.py: Maneja la lógica principal del monitoreo SIP
+sip_trunk.py: Implementa el manejo de conexiones TCP persistentes según RFC 5626
+tcp_connection.py: Maneja el buffering y procesamiento de mensajes individuales
+network_utils.py: Proporciona utilidades de red como obtener la IP local
+
+
+
+
+
+
+
+Estoy haciendo una APP, una herramienta, en python con esta estructura y caracteristicas
+
+PySIPP GUI
+Una interfaz gráfica para gestión de tráfico SIP utilizando PySIPP.
+Características
+Interfaz gráfica con estilo retro-terminal
+Soporte para modo cliente y servidor
+Múltiples protocolos de transporte (UDP, TCP, TLS)
+Simulación de condiciones de red
+Monitorización de SIPtrunk
+Gestión de llamadas múltiples
+Personalización de mensajes SIP
+Pruebas de carga con SIP + RTP
+Requisitos
+Python 3.8 o superior
+Ubuntu 24.04
+SIPp instalado en el sistema
+Instalación
+Clonar el repositorio:
+bashCopygit clone https://github.com/yourusername/pysipp-gui.git
+cd pysipp-gui
+Crear un entorno virtual (recomendado):
+bashCopypython -m venv venv
+source venv/bin/activate  # En Linux/Mac
+Instalar dependencias:
+bashCopypip install -e ".[dev]"  # Incluye dependencias de desarrollo
+Uso
+Iniciar la aplicación:
+bashCopypython -m pysipp_gui
+Para desarrollo:
+bashCopy# Ejecutar tests
+pytest
+# Formatear código
+black src/
+# Verificar estilo
+flake8 src/
+Estructura del Proyecto
+pysipp-gui/
+│
+├── README.md
+├── requirements.txt
+├── setup.py
+│
+├── src/
+│   ├── init.py
+│   │
+│   ├── core/
+│   │   ├── init.py
+│   │   ├── sipp_controller.py     # Control principal de SIPP
+│   │   ├── sip_message_builder.py # Construcción de mensajes SIP
+│   │   ├── network_simulator.py   # Simulación de condiciones de red
+│   │   └── call_manager.py        # Gestión de llamadas y RTP
+│   │
+│   ├── ui/
+│   │   ├── init.py
+│   │   ├── main_window.py        # Ventana principal
+│   │   ├── retro_style.py        # Estilos retro
+│   │   ├── components/
+│   │   │   ├── init.py
+│   │   │   ├── network_panel.py  # Panel de configuración de red
+│   │   │   ├── sip_panel.py      # Panel de configuración SIP
+│   │   │   └── monitor_panel.py  # Panel de monitorización
+│   │   └── themes/
+│   │       ├── init.py
+│   │       └── retro_theme.py    # Definición del tema retro
+│   │
+│   ├── utils/
+│   │   ├── init.py
+│   │   ├── config_manager.py     # Gestión de configuración
+│   │   ├── logger.py             # Sistema de logging
+│   │   └── network_utils.py      # Utilidades de red
+│   │
+│   └── tests/
+│       ├── init.py
+│       ├── test_sipp_controller.py
+│       ├── test_network_simulator.py
+│       └── test_call_manager.py
+│
+└── config/
+    ├── default_config.yaml       # Configuración por defecto
+    └── sip_templates/            # Plantillas de mensajes SIP
+        ├── invite.xml
+        ├── options.xml
+        └── register.xml
+        ç
+        
+        
+        
+ 20 de enero 2025################################################################################################################################3
+ 
+ 
+ Aquí tienes un resumen completo de la aplicación de testing SIP:
+
+PySIPP GUI - Aplicación de Testing SIP
+
+Descripción General:
+Aplicación de pruebas SIP con interfaz gráfica que permite monitorear y probar conexiones SIP. Implementada en Python usando PyQt6 para la interfaz gráfica y con un diseño retro-terminal (verde sobre negro).
+
+Componentes Principales:
+
+Interfaz Gráfica:
+Implementada con PyQt6
+Estilo retro-terminal con colores verde/negro
+LED indicador para estado de conexión
+Paneles para configuración y monitoreo
+Funcionalidades SIP:
+Soporte para protocolos UDP/TCP
+Envío y monitorización de mensajes OPTIONS
+Medición de latencia
+Control de timeouts
+Estadísticas de mensajes enviados/recibidos
+Estructura del Proyecto:
+
+
+Copy
+pysipp-gui/
+├── src/
+│   ├── core/
+│   │   ├── sip_monitor.py      # Lógica principal SIP
+│   │   ├── sip_trunk.py        # Manejo de conexiones TCP
+│   │   └── tcp_connection.py    # Procesamiento de mensajes
+│   ├── ui/
+│   │   ├── components/
+│   │   │   ├── led_indicator.py # Indicador LED
+│   │   │   └── network_panel.py # Panel principal
+│   │   └── themes/
+│   │       └── retro_theme.py   # Estilos visuales
+│   └── utils/
+│       └── network_utils.py     # Utilidades de red
+Librerías Principales:
+
+PyQt6: Para la interfaz gráfica
+socket: Para comunicaciones de red
+threading: Para manejo de hilos en monitoreo
+datetime: Para timestamps y cálculos de tiempo
+Funcionalidades Actuales:
+
+Configuración de conexiones SIP (local/remota)
+Monitoreo de mensajes OPTIONS
+Medición de latencia
+Indicador LED de estado
+Estadísticas básicas (mensajes enviados/recibidos)
+Soporte para UDP y TCP
+Estado Actual:
+
+Interfaz funcional con estilo retro
+Monitoreo básico SIP implementado
+Medición de latencia funcionando
+Sistema de logs para debugging
+Este resumen proporciona el contexto necesario para entender el estado actual del proyecto y su arquitectura, facilitando la implementación de nuevas funcionalidades.
+
+
+
+
+
+RESUMEN ESTADO 24 ENERO 2025 
+
+Hola. Estoy haciendo una APP en python para usar como una herramienta para testear entornos de telefonia SIP y para interacturar con PBX tipo asterisk y SBC (session border controller)
+
+Características
+Interfaz gráfica con estilo retro-terminal
+Soporte para modo cliente y servidor
+Múltiples protocolos de transporte (UDP, TCP, TLS)
+Simulación de condiciones de red
+Monitorización de SIPtrunk
+Gestión de llamadas múltiples
+Personalización de mensajes SIP
+Pruebas de carga con SIP + RTP
+
+── pysipp-gui
+│   ├── config
+│   │   ├── sip_templates
+│   │   │   ├── call.xml
+│   │   │   ├── options.xml
+│   │   │   └── receive_call.xml
+│   │   ├── call_templates.xml
+│   │   └── default_config.yaml
+│   ├── src
+│   │   ├── core
+│   │   │   ├── pycache
+│   │   │   ├── init.py
+│   │   │   ├── session_timer.py
+│   │   │   ├── sip_call_handler.py
+│   │   │   ├── sip_monitor.py
+│   │   │   ├── sipp_controller.py
+│   │   │   ├── sip_trunk.py
+│   │   │   ├── tcp_connection.py
+│   │   │   └── trunk_states.py
+│   │   ├── pycache
+│   │   │   └── main.cpython-312.pyc
+│   │   ├── pysipp_gui.egg-info
+│   │   │   ├── dependency_links.txt
+│   │   │   ├── PKG-INFO
+│   │   │   ├── requires.txt
+│   │   │   ├── SOURCES.txt
+│   │   │   └── top_level.txt
+│   │   ├── tests
+│   │   │   ├── pycache
+│   │   │   ├── test_network_utils.py
+│   │   │   ├── test_sip_monitor.py
+│   │   │   └── test_sipp_controller.py
+│   │   ├── ui
+│   │   │   ├── components
+│   │   │   ├── pycache
+│   │   │   ├── themes
+│   │   │   ├── init.py
+│   │   │   ├── main_window.py
+│   │   │   └── retro_style.py
+│   │   ├── utils
+│   │   │   ├── pycache
+│   │   │   ├── config_manager.py
+│   │   │   └── network_utils.py
+│   │   ├── init.py
+│   │   └── main.py
+
+RFC Principales a considerar:
+RFC 5626: Gestión de conexiones TCP persistentes en SIP
+RFC 5923: Connection Reuse in SIP
+RFC 4028: Session Timers in SIP (relacionado con keepalive)
+RFC 3261: SIP base protocol (sección 18 sobre TCP)
+Puntos clave a implementar:
+Conexión TCP persistente como conexión principal
+Mecanismo de detección de caída de conexión
+Reconexión automática
+Keepalive basado en OPTIONS
+Gestión de estados del trunk (up/down)

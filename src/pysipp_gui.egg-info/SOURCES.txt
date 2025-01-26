@@ -1,0 +1,17 @@
+README.md
+setup.py
+src/core/__init__.py
+src/core/sipp_controller.py
+src/pysipp_gui.egg-info/PKG-INFO
+src/pysipp_gui.egg-info/SOURCES.txt
+src/pysipp_gui.egg-info/dependency_links.txt
+src/pysipp_gui.egg-info/requires.txt
+src/pysipp_gui.egg-info/top_level.txt
+src/ui/__init__.py
+src/ui/main_window.py
+src/ui/retro_style.py
+src/ui/components/__init__.py
+src/ui/components/network_panel.py
+src/ui/components/terminal_widget.py
+src/ui/themes/__init__.py
+src/ui/themes/retro_theme.py

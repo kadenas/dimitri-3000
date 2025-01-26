@@ -1,0 +1,20 @@
+<sip_calls>
+    <templates>
+        <invite>
+            <header>INVITE sip:${to_uri} SIP/2.0</header>
+            <sdp>
+                v=0
+                o=- 1234 5678 IN IP4 ${local_ip}
+                s=PySIPP Call
+                c=IN IP4 ${local_ip}
+                t=0 0
+                m=audio ${rtp_port} RTP/AVP 0
+                a=rtpmap:0 PCMU/8000
+            </sdp>
+        </invite>
+    </templates>
+    <number_ranges>
+        <from>1000-1999</from>
+        <to>2000-2999</to>
+    </number_ranges>
+</sip_calls>

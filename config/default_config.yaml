@@ -1,0 +1,31 @@
+app:
+  name: "PySIPP GUI"
+  version: "0.1.0"
+
+network:
+  default_transport: "UDP"
+  supported_transports: ["UDP", "TCP", "TLS"]
+  default_ports:
+    udp: 5060
+    tcp: 5060
+    tls: 5061
+
+sip:
+  default_scenario: "uac"  # user agent client
+  registration_timeout: 3600
+  retry_attempts: 3
+  default_headers:
+    user_agent: "PySIPP-GUI/0.1.0"
+    allow: "INVITE, ACK, CANCEL, OPTIONS, BYE"
+
+simulation:
+  default_latency: 0
+  default_packet_loss: 0
+  max_concurrent_calls: 100
+  call_rate: 1  # calls per second
+
+logging:
+  level: "INFO"
+  file: "pysipp-gui.log"
+  max_size: 1048576  # 1MB
+  backup_count: 5
