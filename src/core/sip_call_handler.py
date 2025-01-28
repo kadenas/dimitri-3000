@@ -7,6 +7,7 @@ from enum import Enum
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal
+from .models import CallData, CallState
 
 class CallState(Enum):
     INITIAL = "INITIAL"
@@ -133,6 +134,8 @@ class SIPCallHandler(QObject):
         self.stats = {"active": 0, "failed": 0, "total": 0}
         
         self._start_session_refresh_timer()
+        self.trunk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.trunk.bind((self.local_ip, self.local_port))
 
     def start_single_call(self, from_uri: str, to_uri: str) -> bool:
         try:

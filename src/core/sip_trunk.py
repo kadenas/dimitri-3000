@@ -264,14 +264,17 @@ class SIPTrunk:
     def maintain_connection(self):
         try:
             if not self.is_connected:
-                if self._reconnect_attempts < self._max_reconnect_attempts:
-                    if self.connect():
-                        self._reconnect_attempts = 0
-                        return True
-                return False
-
+                print("Debug: Reconectando...")
+                return self.connect()
+                
+            # Comparar timestamps en el mismo formato
+            if self._last_keepalive:
+                elapsed = (datetime.now() - self._last_keepalive).total_seconds()
+                if elapsed > self._keepalive_interval:
+                    self._connection.send(b"\r\n")
+                    self._last_keepalive = datetime.now()
+                
             return True
-            
         except socket.error:
             return self._handle_reconnection()
         
@@ -442,25 +445,24 @@ class SIPTrunk:
                 message = message.decode('utf-8', errors='ignore')
                 
             if "OPTIONS" in message.split('\r\n')[0]:
-                self.stats['options_received'] += 1
                 response = self._create_response_to_options(message)
+                if response:
+                    print(f"Debug: Enviando respuesta 200 OK para OPTIONS")
+                    self._connection.sendall(response.encode('utf-8'))
+                    self.stats['ok_sent'] += 1
+                    self._update_keepalive_timestamp() # Importante!
+                    return True
+            elif "200 OK" in message:
+                self.stats['ok_received'] += 1
+                rtt = time.time() - self._last_request_time
+                self.stats['last_latency'] = rtt * 1000  # Convertir a ms
+                print(f"Debug: 200 OK recibido, RTT: {rtt*1000:.2f}ms")
+                return True
                 
-                if response and self._connection:
-                    try:
-                        response_bytes = response.encode('utf-8')
-                        self._connection.sendall(response_bytes)
-                        self.stats['ok_sent'] += 1
-                        print(f"Debug: Mensaje SIP recibido y procesado: {message[:50]}...")
-                        return True
-                    except socket.error as e:
-                        print(f"Error enviando respuesta: {e}")
-                        self._handle_connection_error()
-                        return False
-                        
             return False
             
         except Exception as e:
-            print(f"Error manejando mensaje entrante: {e}")
+            print(f"Error: {e}")
             return False
     
     def _create_response_to_options(self, options_message: str) -> Optional[str]:

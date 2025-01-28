@@ -106,38 +106,103 @@ class MainWindow(QMainWindow):
             print(f"Error registrando mensaje: {str(e)}")
 
     def setup_connections(self):
-        """Configura las conexiones de señales y slots."""
         try:
-            # Conexiones del panel de red
+            # Primero conectar el monitor SIP
+            if hasattr(self.network_panel, 'sip_monitor'):
+                self.network_panel.sip_monitor.trunk_state_changed.connect(self.handle_trunk_state)
+                self.log_message("Monitor SIP conectado")
+
+            # Resto de conexiones
             self.network_panel.log_message.connect(self.log_message)
+            self.network_panel.server_button.toggled.connect(self.handle_server_status)
             self.network_panel.connectivity_status_changed.connect(self.handle_connectivity_status)
             self.network_panel.options_status_changed.connect(self.handle_options_status)
-            
-            if hasattr(self.network_panel, 'server_button'):
-                self.network_panel.server_button.toggled.connect(self.handle_server_status)
-            
-            # Conexiones del panel de llamadas
+                
+            # Panel de llamadas
             if hasattr(self, 'call_panel'):
+                self.call_panel.setEnabled(False)  # Deshabilitado inicialmente
                 self.call_panel.call_initiated.connect(self.handle_call_initiation)
                 self.call_panel.burst_started.connect(self.handle_burst_start)
                 self.call_panel.burst_stopped.connect(self.handle_burst_stop)
                 self.call_panel.bye_all.connect(self.handle_bye_all)
-                
         except Exception as e:
-            self.log_message(f"Error configurando conexiones: {str(e)}")
+            self.log_message(f"Error en setup_connections: {str(e)}")
+    def handle_call_initiation(self, from_uri: str, to_uri: str):
+        try:
+            if self.call_handler:
+                success = self.call_handler.start_single_call(from_uri, to_uri)
+                self.log_message(f"Llamada iniciada: {from_uri} -> {to_uri}")
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
+
+    def handle_burst_start(self, interval: int, max_calls: int):
+        try:
+            if self.call_handler:
+                self.call_handler.start_call_burst(interval, max_calls)
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
+
+    def handle_burst_stop(self):
+        try:
+            if self.call_handler:
+                self.call_handler.stop_call_burst()
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
+
+    def handle_bye_all(self):
+        try:
+            if self.call_handler:
+                self.call_handler.terminate_all_calls()
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
+
+    def handle_trunk_state(self, state: str):
+        try:
+            self.log_message(f"Recibido estado trunk: {state}")
+            if state == "UP":
+                if hasattr(self, 'call_panel'):
+                    self.call_panel.setEnabled(True)
+                    self.log_message("Panel de llamadas activado")
+        except Exception as e:
+            self.log_message(f"Error en handle_trunk_state: {str(e)}")
+
+    def handle_connectivity_status(self, is_connected: bool):
+        """Maneja eventos de conectividad."""
+        try:
+            message = "Conectividad establecida" if is_connected else "Sin conectividad"
+            self.log_message(message)
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
+
+    def handle_options_status(self, is_active: bool):
+        """Maneja eventos de estado OPTIONS."""
+        try:
+            if is_active:
+                self.call_panel.setEnabled(True)
+                self.log_message("Monitoreo OPTIONS activo - Panel de llamadas habilitado")
+            else:
+                self.call_panel.setEnabled(False)
+                self.log_message("Monitoreo OPTIONS inactivo")
+        except Exception as e:
+            self.log_message(f"Error: {str(e)}")
 
     def setup_call_handler(self):
-        """Configura el manejador de llamadas SIP."""
         try:
             if not self.call_handler:
-                self.call_handler = SIPCallHandler()
+                config = {
+                    'local_ip': self.network_panel.local_ip,
+                    'local_port': self.network_panel.local_port,
+                    'remote_ip': self.network_panel.remote_ip,
+                    'remote_port': self.network_panel.remote_port,
+                    'transport': self.network_panel.transport
+                }
+                self.call_handler = SIPCallHandler(config)
+                if hasattr(self, 'call_panel'):
+                    self.call_panel.set_call_handler(self.call_handler)
+                    self.call_panel.setEnabled(True)
                 self.log_message("Manejador de llamadas inicializado")
-                
-            if hasattr(self, 'call_panel'):
-                self.call_panel.set_call_handler(self.call_handler)
-                
         except Exception as e:
-            self.log_message(f"Error inicializando call handler: {str(e)}")
+            self.log_message(f"Error crítico inicializando call handler: {str(e)}")
 
     @pyqtSlot(str)
     def update_trunk_status(self, status: str):
@@ -187,16 +252,16 @@ class MainWindow(QMainWindow):
         try:
             if is_active:
                 self.setup_call_handler()
-                if self.call_handler:
-                    self.call_panel.set_call_handler(self.call_handler)
+                # Forzar habilitación del panel
+                if hasattr(self, 'call_panel'):
                     self.call_panel.setEnabled(True)
-                    self.log_message("Servidor SIP activado")
+                    self.log_message("Panel de control de llamadas habilitado")
             else:
-                self.call_panel.setEnabled(False)
-                self.log_message("Servidor SIP desactivado")
-                
+                if hasattr(self, 'call_panel'):
+                    self.call_panel.setEnabled(False)
+                    
         except Exception as e:
-            self.log_message(f"Error cambiando estado del servidor: {str(e)}")
+            self.log_message(f"Error: {str(e)}")
 
     # Resto de métodos se mantienen igual...
     # (handle_connectivity_status, handle_options_status, apply_theme, etc.)

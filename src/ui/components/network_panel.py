@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QCheckBox, QMessageBox, QGridLayout)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from datetime import datetime
+import socket
 
 # Importaciones de componentes propios
 from src.core.sip_monitor import SIPMonitor
@@ -13,7 +14,7 @@ from src.ui.components.call_control_panel import CallControlPanel  # Solo una ve
 
 
 class NetworkPanel(QWidget):
-    """Panel de configuración de red con monitoreo SIP integrado."""
+    """Panel de configuración de redd con monitoreo SIP integrado."""
     
     # Señales para notificar eventos
     options_status_changed = pyqtSignal(bool)
@@ -29,6 +30,7 @@ class NetworkPanel(QWidget):
         self.trunk_manager = None
         self.sip_monitor = SIPMonitor()  # Añadir esta línea
         self.main_layout = QVBoxLayout(self)
+        self.local_ip = self._get_local_ip()
         self.setup_ui()
         self.setup_connections()
         self.init_local_ip()
@@ -248,6 +250,17 @@ class NetworkPanel(QWidget):
             }
         """
         self.setStyleSheet(style)
+
+    def _get_local_ip(self) -> str:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception as e:
+            print(f"Error obteniendo IP local: {e}")
+            return "127.0.0.1"  # Fallback
 
     def get_trunk_manager(self):
         """Obtiene el trunk SIP asociado al panel de red."""

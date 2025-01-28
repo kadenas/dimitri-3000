@@ -5,6 +5,7 @@ from typing import Optional
 from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
 from PyQt6.QtGui import QColor
 from PyQt6.QtCore import QObject, pyqtSignal
+from src.core.models import CallData, CallState
 
 class CallState(Enum):
     INITIAL = "INITIAL"
@@ -13,16 +14,6 @@ class CallState(Enum):
     ESTABLISHED = "ESTABLISHED"
     FAILED = "FAILED"
     FINISHED = "FINISHED"
-
-@dataclass
-class CallData:
-    call_id: str
-    from_uri: str
-    to_uri: str
-    state: CallState
-    direction: str
-    start_time: datetime
-    duration: Optional[str] = None
 
 class CallMonitor(QObject):
     """Centraliza la lógica de monitoreo de llamadas"""

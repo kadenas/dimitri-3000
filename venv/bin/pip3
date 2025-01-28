@@ -1,4 +1,4 @@
-#!/home/jeromosquera/pysipp-gui/venv/bin/python
+#!/home/jeromosquera/Proyecto_MOMO/pysipp-gui/venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

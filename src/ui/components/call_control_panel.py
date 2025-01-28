@@ -7,6 +7,9 @@ import traceback  # Añadir esta línea
 from src.core.sip_call_handler import SIPCallHandler  # Esta es la única que necesitamos
 from src.ui.components.call_monitor_table import CallMonitorTable
 from src.core.sip_monitor import SIPMonitor
+import uuid
+import time
+from src.core.models import CallData, CallState
 
 class CallControlPanel(QWidget):
     # Señales para comunicación con el controlador principal

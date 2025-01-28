@@ -10,6 +10,7 @@ from .sip_trunk import SIPTrunk
 from .trunk_states import SIPTrunkState
 from .tcp_connection import TCPConnection
 from ..utils.logger import debug_log
+from .models import CallData
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class SIPMonitor(QObject):
         self._cseq_lock = threading.Lock()
         self._last_options_response: Optional[datetime] = None
         self._last_rtt: Optional[float] = None
+        self.active_calls = {}  # Diccionario para almacenar llamadas
         
         # Estadísticas
         self._stats = {
