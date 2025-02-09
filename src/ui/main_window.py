@@ -40,9 +40,8 @@ class MainWindow(QMainWindow):
         self.network_panel = NetworkPanel()
         self.tabs.addTab(self.network_panel, "Red")
         
-        # Panel de control de llamadas
-        self.call_panel = CallControlPanel()
-        self.call_panel.setEnabled(False)
+        # Panel de control de llamadas - Usar el del NetworkPanel
+        self.call_panel = self.network_panel.call_control_panel
         self.tabs.addTab(self.call_panel, "Control de Llamadas")
         
         # Terminal
@@ -56,7 +55,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         
         # Aplicar tema retro
-        self.apply_theme()  # <-- Método que faltaba
+        self.apply_theme()
         self.log_message("Aplicación iniciada")
 
     def apply_theme(self):
@@ -188,19 +187,14 @@ class MainWindow(QMainWindow):
 
     def setup_call_handler(self):
         try:
-            if not self.call_handler:
-                config = {
-                    'local_ip': self.network_panel.local_ip,
-                    'local_port': self.network_panel.local_port,
-                    'remote_ip': self.network_panel.remote_ip,
-                    'remote_port': self.network_panel.remote_port,
-                    'transport': self.network_panel.transport
-                }
-                self.call_handler = SIPCallHandler(config)
+            # Usar el call handler del NetworkPanel
+            self.call_handler = self.network_panel.call_handler
+            if self.call_handler:
+                self.log_message("Usando call handler del NetworkPanel")
                 if hasattr(self, 'call_panel'):
-                    self.call_panel.set_call_handler(self.call_handler)
                     self.call_panel.setEnabled(True)
-                self.log_message("Manejador de llamadas inicializado")
+            else:
+                self.log_message("Error: Call handler no disponible en NetworkPanel")
         except Exception as e:
             self.log_message(f"Error crítico inicializando call handler: {str(e)}")
 

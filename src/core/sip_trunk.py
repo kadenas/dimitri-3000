@@ -6,16 +6,22 @@ import threading
 from datetime import datetime
 from .trunk_states import SIPTrunkState
 import logging
+from .tcp_connection import TCPConnection
+from PyQt6.QtCore import QObject, pyqtSignal
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-class SIPTrunk:
+class SIPTrunk(QObject):
     """
     Representa un trunk SIP con conexión TCP persistente y monitoreo mediante OPTIONS.
     Implementa las recomendaciones de RFC 5626 y RFC 5923.
     """
     
+    # Señales
+    stats_updated = pyqtSignal()  # Para notificar actualizaciones de estadísticas
+    rtt_updated = pyqtSignal(float)  # Para notificar nuevo RTT
+
     def __init__(self, config: Dict):
         """
         Inicializa un trunk SIP con conexión TCP persistente.
@@ -32,13 +38,26 @@ class SIPTrunk:
                 'interval': int
             }
         """
-        # Configuración básica
+        super().__init__()
         self.config = config
         self._state = SIPTrunkState.DOWN
         self._cseq_lock = threading.Lock()
         self._cseq = 0
         self._instance_id = f"<urn:uuid:{uuid.uuid4()}>"
-
+        self._last_options_sent = None
+        self._last_keepalive = None
+        self.stats = {
+            'options_sent': 0,
+            'options_received': 0,
+            'ok_sent': 0,
+            'ok_received': 0,
+            'timeouts': 0,
+            'reconnects': 0,
+            'last_rtt': None,
+            'connection_uptime': 0,
+            'errors': 0
+        }
+        
         # Conexión y gestión TCP
         self._connection: Optional[socket.socket] = None
         self._persistent_connection = None
@@ -58,29 +77,22 @@ class SIPTrunk:
         self._last_keepalive: Optional[datetime] = None
         self._last_activity: Optional[datetime] = None
         
-        # Estadísticas
-        self.stats = {
-            'options_sent': 0,
-            'options_received': 0,
-            'ok_sent': 0,
-            'ok_received': 0,
-            'timeouts': 0,
-            'reconnects': 0,
-            'last_rtt': None,
-            'connection_uptime': 0
-        }
-        
-        # Buffer para mensajes TCP
-        self._receive_buffer = b""
+        # Nueva conexión TCP
+        self.tcp_connection = TCPConnection()
+
+        logger.debug("Creando nuevo SIPTrunk")
 
     def send_message(self, message: bytes):
+        """Envía un mensaje a través de la conexión TCP."""
         try:
-            if self._connection:
-                self._connection.sendall(message)
-                return True
-            return False
+            if not self.tcp_connection or not self.tcp_connection.is_connected:
+                logger.error("No hay conexión TCP activa")
+                return False
+                
+            return self.tcp_connection.send_data(message.decode('utf-8'))
+            
         except Exception as e:
-            print(f"Error enviando mensaje: {e}")
+            logger.error(f"Error enviando mensaje TCP: {e}")
             return False
 
     def establish_persistent_connection(self) -> bool:
@@ -154,63 +166,36 @@ class SIPTrunk:
     # Métodos de conexión
 
     def connect(self) -> bool:
-        """Establece conexión TCP persistente según RFC 5626 Sección 5.5 y RFC 5923."""
-        max_retries = 3
-        backoff_base = 2  # segundos para backoff exponencial
-        timeout = self.config.get('timeout', 30)  # RFC 5923 Sección 4.1
-        
-        for attempt in range(max_retries):
-            try:
-                # 1. Limpieza inicial (RFC 5923 Sección 4.2.1)
-                if self._connection:
-                    self.disconnect()
-                
-                # 2. Configuración inicial del socket
-                self._state = SIPTrunkState.CONNECTING
-                self._connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                
-                # 3. Configurar Keep-Alive según RFC 5626 Sección 5.5
-                self._connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                if hasattr(socket, 'TCP_KEEPIDLE'):
-                    self._connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)  # 30s inactividad
-                    self._connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)  # 10s entre checks
-                    self._connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)    # 3 intentos
-                
-                # 4. Timeouts según RFC 5923 Sección 4.1
-                connect_timeout = min(30, timeout * (attempt + 1))
-                self._connection.settimeout(connect_timeout)
-                
-                # 5. Establecer conexión
-                logger.debug(f"Intento {attempt+1} de conexión a {self.config['remote_ip']}:{self.config['remote_port']}")
-                self._connection.connect((self.config['remote_ip'], self.config['remote_port']))
-                
-                # 6. Configuración post-conexión
-                self._connection.settimeout(timeout)
-                self._flow_token = self._generate_flow_token()
-                self._state = SIPTrunkState.UP
-                self._last_keepalive = datetime.now()
-                
-                # 7. Registro inicial (RFC 5626 Sección 5.2)
-                if self.config.get('auto_register', False):
-                    self._send_initial_register()
-                
-                logger.info(f"Conexión establecida (Intento {attempt+1})")
+        """Establece la conexión TCP."""
+        try:
+            if self.is_connected:
+                logger.debug("Ya existe una conexión activa")
                 return True
                 
-            except (socket.timeout, ConnectionRefusedError) as e:
-                logger.warning(f"Error de conexión (Intento {attempt+1}): {str(e)}")
-                time.sleep(backoff_base ** attempt)
-                continue
+            logger.debug(f"Conectando a {self.config['remote_ip']}:{self.config['remote_port']}")
+            
+            if not self.tcp_connection:
+                self.tcp_connection = TCPConnection()
                 
-            except Exception as e:
-                logger.error(f"Error inesperado: {str(e)}", exc_info=True)
-                self._handle_connection_error()
-                break
+            success = self.tcp_connection.connect(
+                self.config['remote_ip'],
+                self.config['remote_port'],
+                timeout=self.config.get('timeout', 5)
+            )
+            
+            if success:
+                self._state = SIPTrunkState.UP
+                logger.debug("Conexión TCP establecida")
+            else:
+                self._state = SIPTrunkState.DOWN
+                logger.error("No se pudo establecer la conexión TCP")
                 
-        # Si fallan todos los intentos
-        self._state = SIPTrunkState.DOWN
-        logger.error("Falló la conexión después de %d intentos", max_retries)
-        return False
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error en conexión TCP: {e}")
+            self._state = SIPTrunkState.DOWN
+            return False
 
     def _send_initial_register(self):
         """Envía REGISTER inicial según RFC 5626 Sección 5.2"""
@@ -440,32 +425,39 @@ class SIPTrunk:
 
     
     def handle_incoming_message(self, message: str) -> bool:
+        """Maneja mensajes entrantes en el trunk."""
         try:
-            if isinstance(message, bytes):
-                message = message.decode('utf-8', errors='ignore')
+            logger.debug(f"Mensaje recibido en trunk:\n{message}")
+            
+            # Si es OPTIONS, procesar y responder
+            if "OPTIONS" in message:
+                logger.debug("OPTIONS recibido en trunk")
+                self.stats['options_received'] += 1
                 
-            if "OPTIONS" in message.split('\r\n')[0]:
-                response = self._create_response_to_options(message)
+                response = self._create_options_response(message)
                 if response:
-                    print(f"Debug: Enviando respuesta 200 OK para OPTIONS")
-                    self._connection.sendall(response.encode('utf-8'))
-                    self.stats['ok_sent'] += 1
-                    self._update_keepalive_timestamp() # Importante!
-                    return True
-            elif "200 OK" in message:
-                self.stats['ok_received'] += 1
-                rtt = time.time() - self._last_request_time
-                self.stats['last_latency'] = rtt * 1000  # Convertir a ms
-                print(f"Debug: 200 OK recibido, RTT: {rtt*1000:.2f}ms")
-                return True
+                    success = self.tcp_connection.send_data(response)
+                    if success:
+                        self.stats['ok_sent'] += 1
+                        logger.debug("200 OK enviado desde trunk")
+                    return success
                 
-            return False
+            # Si es respuesta 200 OK
+            elif "SIP/2.0 200 OK" in message:
+                logger.debug("200 OK recibido en trunk")
+                self.stats['ok_received'] += 1
+                
+            # Notificar actualización de estadísticas
+            if hasattr(self, 'stats_updated'):
+                self.stats_updated.emit()
+                
+            return True
             
         except Exception as e:
-            print(f"Error: {e}")
+            logger.error(f"Error manejando mensaje en trunk: {e}")
             return False
     
-    def _create_response_to_options(self, options_message: str) -> Optional[str]:
+    def _create_options_response(self, options_message: str) -> Optional[str]:
         """
         Crea una respuesta 200 OK basada en el mensaje OPTIONS recibido.
         Mantiene los campos necesarios del mensaje original.
@@ -517,33 +509,32 @@ class SIPTrunk:
     
     # Métodos de manejo de mensajes TCP
 
-    def _receive_response(self, buffer_size: int = 4096) -> Optional[str]:
-        buffer = b""
-        start_time = time.time()
-        timeout = self.config.get('timeout', 10)
-        
+    def _receive_response(self, timeout: int = 5) -> Optional[str]:
+        """Recibe una respuesta SIP a través de la conexión TCP."""
         try:
-            self._connection.settimeout(timeout/2)
+            if not self.tcp_connection or not self.tcp_connection.is_connected:
+                logger.error("No hay conexión TCP activa para recibir respuesta")
+                return None
+
+            start_time = time.time()
+            response = ""
             
             while time.time() - start_time < timeout:
-                try:
-                    chunk = self._connection.recv(buffer_size)
-                    if not chunk:
-                        continue
-                    
-                    buffer += chunk
-                    if b"\r\n\r\n" in buffer:
-                        return buffer.decode('utf-8')
-                    
-                except socket.timeout:
-                    continue
+                data = self.tcp_connection.receive_data()
+                if data:
+                    response += data
+                    if "\r\n\r\n" in response:  # Mensaje SIP completo
+                        logger.debug(f"Respuesta recibida: {response}")
+                        return response
+                time.sleep(0.1)  # Pequeña pausa para no saturar CPU
                 
+            logger.warning("Timeout esperando respuesta SIP")
+            self.stats['timeouts'] += 1
             return None
             
-        except socket.error as e:
-            print(f"Debug: Error en socket durante recepción: {e}")
+        except Exception as e:
+            logger.error(f"Error recibiendo respuesta: {e}")
             return None
-            
 
     @property
     def is_connected(self) -> bool:
@@ -613,4 +604,159 @@ class SIPTrunk:
     def __del__(self):
         """Limpieza al destruir el objeto."""
         self.disconnect()
+
+    def handle_options_response(self, response):
+        """Maneja las respuestas OPTIONS."""
+        try:
+            if response and 'headers' in response:
+                timestamp = datetime.now()
+                if self._last_options_sent:
+                    rtt = (timestamp - self._last_options_sent).total_seconds() * 1000
+                    self.last_rtt = rtt
+                    
+                self.stats['ok_received'] += 1
+                self._update_led_status(True)
+                return True
+        except Exception as e:
+            logger.error(f"Error handling OPTIONS response: {e}")
+        return False
+
+    def _update_led_status(self, active: bool):
+        """Actualiza el estado del LED basado en la actividad."""
+        if hasattr(self, 'led_indicator'):
+            self.led_indicator.setActive(active)
+
+    def _ensure_tcp_connection(self):
+        """Asegura que la conexión TCP está activa."""
+        try:
+            if not self.tcp_connection or not self.tcp_connection.is_connected:
+                logger.debug("Reconectando TCP...")
+                return self.connect()
+            return True
+        except Exception as e:
+            logger.error(f"Error en _ensure_tcp_connection: {e}")
+            return False
+
+    def send_options(self) -> bool:
+        """Envía mensaje OPTIONS manteniendo la conexión TCP."""
+        try:
+            if not self._ensure_tcp_connection():
+                logger.error("No hay conexión TCP disponible")
+                return False
+            
+            message = self._create_options_message()
+            logger.debug(f"Enviando OPTIONS: {message}")
+            
+            # Incrementar contador y guardar tiempo de envío
+            self.stats['options_sent'] += 1
+            send_time = time.time()
+            
+            if self.config.get('transport', 'TCP').upper() == "TCP":
+                if not self.send_message(message.encode('utf-8')):
+                    logger.error("Error enviando mensaje TCP")
+                    return False
+                    
+                # Esperar respuesta con timeout
+                response = self._receive_response(timeout=self.config.get('timeout', 5))
+                if response:
+                    if "200 OK" in response:
+                        # Calcular RTT aquí donde realmente ocurre el intercambio
+                        rtt = (time.time() - send_time) * 1000
+                        self.stats['last_rtt'] = rtt
+                        logger.debug(f"RTT TCP calculado en trunk: {rtt:.2f}ms")
+                        
+                        self._update_keepalive_timestamp()
+                        self.stats['ok_received'] += 1
+                        self._state = SIPTrunkState.UP
+                        
+                        # Emitir señales para actualizar UI
+                        self.rtt_updated.emit(rtt)
+                        self.stats_updated.emit()
+                        
+                        logger.debug("Respuesta 200 OK recibida")
+                        return True
+                    else:
+                        logger.warning(f"Respuesta no esperada: {response.splitlines()[0]}")
+                        self._state = SIPTrunkState.DEGRADED
+                else:
+                    logger.warning("No se recibió respuesta al OPTIONS")
+                    self.stats['timeouts'] += 1
+                    self._state = SIPTrunkState.DOWN
+                    self.stats_updated.emit()
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error en send_options: {e}")
+            self._state = SIPTrunkState.DOWN
+            return False
+
+    def _create_options_message(self) -> str:
+        """Crea un mensaje OPTIONS SIP."""
+        branch = f"z9hG4bK-{uuid.uuid4().hex[:16]}"
+        call_id = f"{uuid.uuid4()}@{self.config['local_ip']}"
+        from_tag = uuid.uuid4().hex[:8]
+        
+        with self._cseq_lock:
+            self._cseq += 1
+            cseq = self._cseq
+
+        message = (
+            f"OPTIONS sip:{self.config['remote_ip']} SIP/2.0\r\n"
+            f"Via: SIP/2.0/TCP {self.config['local_ip']}:{self.config['local_port']}"
+            f";branch={branch};rport\r\n"
+            f"Max-Forwards: 70\r\n"
+            f"From: <sip:{self.config['local_ip']}>;tag={from_tag}\r\n"
+            f"To: <sip:{self.config['remote_ip']}>\r\n"
+            f"Call-ID: {call_id}\r\n"
+            f"CSeq: {cseq} OPTIONS\r\n"
+            f"Contact: <sip:{self.config['local_ip']}:{self.config['local_port']}>\r\n"
+            "User-Agent: PySIPP-Monitor/1.0\r\n"
+            "Content-Length: 0\r\n"
+            "\r\n"
+        )
+        
+        logger.debug(f"Mensaje OPTIONS creado:\n{message}")
+        self._last_options_sent = datetime.now()
+        return message
+
+    def _create_response_to_options(self, options_message: str) -> Optional[str]:
+        """Crea una respuesta 200 OK para un mensaje OPTIONS."""
+        try:
+            # Extraer campos necesarios del OPTIONS recibido
+            headers = {}
+            for line in options_message.split('\r\n'):
+                if ': ' in line:
+                    key, value = line.split(': ', 1)
+                    headers[key.lower()] = value
+                elif line.startswith('Via:'):
+                    headers['via'] = line[4:].strip()
+                elif line.startswith('From:'):
+                    headers['from'] = line[5:].strip()
+                elif line.startswith('To:'):
+                    headers['to'] = line[3:].strip()
+                elif line.startswith('Call-ID:'):
+                    headers['call-id'] = line[8:].strip()
+                elif line.startswith('CSeq:'):
+                    headers['cseq'] = line[5:].strip()
+
+            # Construir respuesta
+            response = (
+                "SIP/2.0 200 OK\r\n"
+                f"Via: {headers.get('via', '')}\r\n"
+                f"From: {headers.get('from', '')}\r\n"
+                f"To: {headers.get('to', '')};tag={uuid.uuid4().hex[:8]}\r\n"
+                f"Call-ID: {headers.get('call-id', '')}\r\n"
+                f"CSeq: {headers.get('cseq', '')}\r\n"
+                f"Contact: <sip:{self.config['local_ip']}:{self.config['local_port']}>\r\n"
+                "Content-Length: 0\r\n"
+                "\r\n"
+            )
+            
+            logger.debug(f"Respuesta OPTIONS creada:\n{response}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error creando respuesta OPTIONS: {e}")
+            return None
 

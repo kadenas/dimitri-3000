@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from datetime import datetime
 
 class CallMonitorTable(QTableWidget):
@@ -11,6 +12,10 @@ class CallMonitorTable(QTableWidget):
         headers = ["Start Time", "State", "From URI", "To URI", "Direction", "Duration"]
         self.setColumnCount(len(headers))
         self.setHorizontalHeaderLabels(headers)
+        
+        # Configurar comportamiento de selección
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         
         self.state_colors = {
             "SETUP": "#FFFF00",

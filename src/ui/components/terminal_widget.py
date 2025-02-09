@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QTextEdit
 from PyQt6.QtGui import QTextCursor
-from src.ui.themes.cyber_theme import RetroCyberTheme  # <-- Nombre actualizado
+from src.ui.themes.cyber_theme import RetroCyberTheme
 
 class TerminalWidget(QTextEdit):
     """Widget que simula una terminal."""
@@ -10,7 +10,7 @@ class TerminalWidget(QTextEdit):
         self.setup_ui()
     
     def setup_ui(self):
-        self.setFont(RetroCyberTheme.get_font())  # <-- Usar la nueva clase
+        self.setFont(RetroCyberTheme.get_font())
         self.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {RetroCyberTheme.BACKGROUND};

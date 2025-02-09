@@ -1,9 +1,11 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, 
                            QLabel, QComboBox, QSpinBox, QLineEdit, QGroupBox,
-                           QPushButton, QCheckBox, QMessageBox, QGridLayout)
+                           QPushButton, QCheckBox, QMessageBox, QGridLayout, QTableWidgetItem, QTableWidget)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from datetime import datetime
 import socket
+import logging
+import time
 
 # Importaciones de componentes propios
 from src.core.sip_monitor import SIPMonitor
@@ -11,7 +13,9 @@ from src.core.sip_trunk import SIPTrunk  # Asegúrate de que esta línea está p
 from src.utils.network_utils import get_local_ip
 from src.ui.components.led_indicator import LedIndicator
 from src.ui.components.call_control_panel import CallControlPanel  # Solo una vez
+from src.core.sip_call_handler import SIPCallHandler
 
+logger = logging.getLogger(__name__)  # Añadir esta línea
 
 class NetworkPanel(QWidget):
     """Panel de configuración de redd con monitoreo SIP integrado."""
@@ -20,6 +24,7 @@ class NetworkPanel(QWidget):
     options_status_changed = pyqtSignal(bool)
     connectivity_status_changed = pyqtSignal(bool)
     log_message = pyqtSignal(str)  # Para enviar mensajes al terminal
+    enable_call_control = pyqtSignal(bool)  # Nueva señal para control de llamadas
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -28,13 +33,45 @@ class NetworkPanel(QWidget):
         self.update_timer.start(1000)
         self._last_monitoring_state = False
         self.trunk_manager = None
-        self.sip_monitor = SIPMonitor()  # Añadir esta línea
+        
+        # Configuración inicial
         self.main_layout = QVBoxLayout(self)
         self.local_ip = self._get_local_ip()
+        self.local_port = 5060
+        self.remote_ip = ""
+        self.remote_port = 5060
+        self.transport = "UDP"  # Valor por defecto
+        
+        # Crear el monitor y mantener una referencia fuerte
+        initial_config = {
+            'local_ip': self.local_ip,
+            'local_port': self.local_port,
+            'remote_ip': self.remote_ip,
+            'remote_port': self.remote_port,
+            'transport': self.transport
+        }
+        
+        # Crear y configurar el monitor
+        self.sip_monitor = SIPMonitor()
+        self.sip_monitor.config = initial_config
+        self._monitor_ref = self.sip_monitor
+        logger.debug(f"Monitor creado con config inicial: {initial_config}")
+        
+        # Crear y configurar el call handler
+        self.call_handler = SIPCallHandler(initial_config)
+        self.call_handler.sip_monitor = self.sip_monitor  # Esto usará el nuevo setter
+        logger.debug("Call handler creado y configurado con monitor")
+        
+        # Crear y configurar el panel de control
+        self.call_control_panel = CallControlPanel(self)
+        self.call_control_panel.set_call_handler(self.call_handler)
+        logger.debug("Panel de control configurado")
+        
         self.setup_ui()
         self.setup_connections()
         self.init_local_ip()
-        print("Debug: NetworkPanel inicializado")
+        self.setup_call_handler()  # Conectar señales al iniciar
+        logger.debug("NetworkPanel inicializado completamente")
     
     def setup_ui(self):
         """Configura la interfaz del panel de red."""
@@ -45,6 +82,7 @@ class NetworkPanel(QWidget):
         protocol_label = QLabel("Protocolo:")
         self.transport_combo = QComboBox()
         self.transport_combo.addItems(["UDP", "TCP", "TLS"])
+        self.transport_combo.currentTextChanged.connect(self.on_transport_changed)
         protocol_layout.addWidget(protocol_label)
         protocol_layout.addWidget(self.transport_combo)
         protocol_layout.addStretch()
@@ -58,6 +96,7 @@ class NetworkPanel(QWidget):
         local_ip_label = QLabel("IP Local:")
         self.local_ip_edit = QLineEdit()
         self.local_ip_edit.setPlaceholderText("192.168.1.100")
+        self.local_ip_edit.setToolTip("Dirección IP de esta máquina")
         local_ip_layout.addWidget(local_ip_label)
         local_ip_layout.addWidget(self.local_ip_edit)
         
@@ -66,7 +105,9 @@ class NetworkPanel(QWidget):
         local_port_label = QLabel("Puerto Local:")
         self.local_port_spin = QSpinBox()
         self.local_port_spin.setRange(1, 65535)
-        self.local_port_spin.setValue(5060)
+        self.local_port_spin.setValue(self.local_port)
+        self.local_port_spin.setToolTip("Puerto local para escuchar conexiones SIP")
+        self.local_port_spin.valueChanged.connect(self.on_port_changed)
         local_port_layout.addWidget(local_port_label)
         local_port_layout.addWidget(self.local_port_spin)
         local_port_layout.addStretch()
@@ -84,6 +125,8 @@ class NetworkPanel(QWidget):
         remote_ip_label = QLabel("IP Remota:")
         self.remote_ip_edit = QLineEdit()
         self.remote_ip_edit.setPlaceholderText("192.168.1.200")
+        self.remote_ip_edit.setToolTip("Dirección IP del servidor SIP remoto")
+        self.remote_ip_edit.textChanged.connect(self.on_remote_ip_changed)
         remote_ip_layout.addWidget(remote_ip_label)
         remote_ip_layout.addWidget(self.remote_ip_edit)
         
@@ -92,7 +135,9 @@ class NetworkPanel(QWidget):
         remote_port_label = QLabel("Puerto Remoto:")
         self.remote_port_spin = QSpinBox()
         self.remote_port_spin.setRange(1, 65535)
-        self.remote_port_spin.setValue(5060)
+        self.remote_port_spin.setValue(self.remote_port)
+        self.remote_port_spin.setToolTip("Puerto del servidor SIP remoto")
+        self.remote_port_spin.valueChanged.connect(self.on_remote_port_changed)
         remote_port_layout.addWidget(remote_port_label)
         remote_port_layout.addWidget(self.remote_port_spin)
         remote_port_layout.addStretch()
@@ -210,6 +255,7 @@ class NetworkPanel(QWidget):
         main_layout.addWidget(options_group)
         main_layout.addWidget(stats_group)
         main_layout.addWidget(server_group)
+        main_layout.addWidget(self.call_control_panel)
         main_layout.addStretch()
         
         # Configurar estilos
@@ -250,6 +296,9 @@ class NetworkPanel(QWidget):
             }
         """
         self.setStyleSheet(style)
+        
+        # Ocultar el panel de control de llamadas inicialmente
+        self.call_control_panel.setVisible(False)
 
     def _get_local_ip(self) -> str:
         try:
@@ -330,9 +379,11 @@ class NetworkPanel(QWidget):
         """Inicializa la IP local con la IP real del sistema."""
         local_ip = get_local_ip()
         if local_ip:
+            self.local_ip = local_ip  # Actualizar el atributo
             self.local_ip_edit.setText(local_ip)
             self.log_message.emit(f"IP local detectada: {local_ip}")
         else:
+            self.local_ip = "0.0.0.0"  # Actualizar el atributo
             self.local_ip_edit.setText("0.0.0.0")
             self.log_message.emit("No se pudo detectar la IP local")
 
@@ -348,112 +399,27 @@ class NetworkPanel(QWidget):
             'timeout': self.options_timeout_spin.value()
         }
 
-    def validate_config(self):
-        """Valida la configuración actual."""
-        config = self.get_config()
-        
-        if not config['local_ip'] or not config['remote_ip']:
-            QMessageBox.warning(self, "Error de Configuración",
-                              "Las direcciones IP no pueden estar vacías.")
-            return False
-            
+    def validate_ip(self, ip_address: str) -> bool:
+        """Valida el formato de una dirección IP."""
         try:
-            # Validar formato de IPs
-            from ipaddress import ip_address
-            ip_address(config['local_ip'])
-            ip_address(config['remote_ip'])
-        except ValueError:
-            QMessageBox.warning(self, "Error de Configuración",
-                              "Formato de IP inválido.")
+            parts = ip_address.split('.')
+            return len(parts) == 4 and all(0 <= int(part) <= 255 for part in parts)
+        except (AttributeError, TypeError, ValueError):
             return False
-            
-        return True
 
-    def test_network_connectivity(self):
-        """Prueba la conectividad de red básica."""
-        if not self.validate_config():
-            return
-            
-        config = self.get_config()
-        self.network_status_label.setText("Estado: Probando...")
-        self.test_network_btn.setEnabled(False)
-        
-        try:
-            result = self.sip_monitor.test_connectivity(
-                config['remote_ip'],
-                config['remote_port'],
-                config['transport']
-            )
-            
-            if result:
-                self.network_status_label.setText("Estado: Conectividad OK")
-                self.connectivity_status_changed.emit(True)
-                self.log_message.emit(f"Conectividad establecida con {config['remote_ip']}:{config['remote_port']}")
-            else:
-                self.network_status_label.setText("Estado: Error de Conectividad")
-                self.connectivity_status_changed.emit(False)
-                self.log_message.emit(f"Error de conectividad con {config['remote_ip']}:{config['remote_port']}")
-                
-        except Exception as e:
-            self.network_status_label.setText("Estado: Error")
-            self.log_message.emit(f"Error al probar conectividad: {str(e)}")
-            
-        finally:
-            self.test_network_btn.setEnabled(True)
+    def on_local_ip_changed(self, value):
+        if self.validate_ip(value):
+            self.local_ip = value
+            self.local_ip_edit.setStyleSheet("")
+        else:
+            self.local_ip_edit.setStyleSheet("border: 1px solid red")
 
-
-    def toggle_server(self):
-        """Maneja el inicio/parada del servidor SIP."""
-        try:
-            if self.server_button.isChecked():
-                # Validar configuración
-                if not self.validate_config():
-                    self.server_button.setChecked(False)
-                    return
-                    
-                print("Debug: Iniciando servidor SIP...")
-                # Inicializar SIPP
-                from src.core.sipp_controller import SIPPController
-                
-                config = {
-                    'local_ip': self.local_ip_edit.text(),
-                    'local_port': self.local_port_spin.value(),
-                    'remote_ip': self.remote_ip_edit.text(),
-                    'remote_port': self.remote_port_spin.value(),
-                    'transport': self.transport_combo.currentText().lower()
-                }
-                
-                self.sipp_controller = SIPPController(config)
-                if self.sipp_controller.initialize():
-                    self.server_status_label.setText("Estado: Activo")
-                    self.log_message.emit("Servidor SIP iniciado correctamente")
-                else:
-                    self.server_button.setChecked(False)
-                    self.server_status_label.setText("Estado: Error")
-                    self.log_message.emit("Error al iniciar el servidor SIP")
-            else:
-                print("Debug: Deteniendo servidor SIP...")
-                if hasattr(self, 'sipp_controller'):
-                    # Limpiar recursos si es necesario
-                    self.sipp_controller = None
-                self.server_status_label.setText("Estado: Detenido")
-                self.log_message.emit("Servidor SIP detenido")
-                
-        except Exception as e:
-            print(f"Error en toggle_server: {e}")
-            self.server_button.setChecked(False)
-            self.server_status_label.setText("Estado: Error")
-            self.log_message.emit(f"Error en el servidor: {str(e)}")
-
-    def validate_config(self):
-        """Valida la configuración antes de iniciar el servidor."""
-        if not self.local_ip_edit.text().strip():
-            self.log_message.emit("Error: IP local es requerida")
-            return False
-        if not self.local_port_spin.value():
-            self.log_message.emit("Error: Puerto local es requerido")
-            return False
-        return True
+    def on_remote_ip_changed(self, value):
+        if self.validate_ip(value):
+            self.remote_ip = value
+            self.remote_ip_edit.setStyleSheet("")
+        else:
+            self.remote_ip_edit.setStyleSheet("border: 1px solid red")
 
     def toggle_options_monitoring(self, state):
         """Activa o desactiva el monitoreo OPTIONS."""
@@ -504,141 +470,122 @@ class NetworkPanel(QWidget):
     def update_status(self):
         """Actualiza el estado mostrado en la interfaz."""
         try:
-            # Verificar si el monitor está inicializado
             if not hasattr(self, 'sip_monitor') or self.sip_monitor is None:
                 return
 
-            # Obtener valores con protección contra None
             stats = getattr(self.sip_monitor, 'stats', {})
-            last_response = getattr(self.sip_monitor, 'last_options_response', None)
-            last_rtt = getattr(self.sip_monitor, 'last_rtt', None)
             
             if self.sip_monitor.is_monitoring:
-                # Actualizar contadores con valores por defecto
+                # Actualizar contadores
                 self.sent_options.setText(f"OPTIONS Enviados: {stats.get('options_sent', 0)}")
                 self.received_options.setText(f"OPTIONS Recibidos: {stats.get('options_received', 0)}")
                 self.sent_ok.setText(f"200 OK Enviados: {stats.get('ok_sent', 0)}")
                 self.received_ok.setText(f"200 OK Recibidos: {stats.get('ok_received', 0)}")
                 self.timeouts.setText(f"Timeouts: {stats.get('timeouts', 0)}")
                 
-                # Manejar latencia
-                latency = stats.get('last_latency')
-                self.latency_value.setText(f"{latency:.2f} ms" if latency else "-- ms")
-
-                # Lógica del LED y estado
-                if last_response:
-                    current_time = datetime.now()
-                    interval = self.options_interval_spin.value() * 1.5
-                    time_since_last = (current_time - last_response).total_seconds()
-                    
-                    self.led_indicator.setActive(time_since_last < interval)
-                    
-                    status_text = f"Estado OPTIONS: OK (Última respuesta: {last_response.strftime('%H:%M:%S')}"
-                    if last_rtt:
-                        status_text += f", RTT: {last_rtt:.2f}ms)"
-                    else:
-                        status_text += ")"
+                # Verificar si hay respuestas OK recientes
+                has_recent_ok = stats.get('ok_received', 0) > 0
+                has_rtt = stats.get('last_latency') is not None
+                has_timeout = stats.get('timeouts', 0) > 0
+                
+                # Actualizar LED y latencia
+                if has_recent_ok and has_rtt and not has_timeout:
+                    # Si tenemos respuestas OK y RTT, mostrar estado activo
+                    self.led_indicator.setActive(True)
+                    self.latency_value.setText(f"{stats['last_latency']:.2f} ms")
+                    current_time = datetime.now().strftime('%H:%M:%S')
+                    self.options_status_label.setText(
+                        f"Estado OPTIONS: OK (Última respuesta: {current_time}, RTT: {stats['last_latency']:.2f}ms)"
+                    )
                 else:
+                    # Si no hay respuestas o hay timeout, mostrar estado inactivo
                     self.led_indicator.setActive(False)
-                    status_text = "Estado OPTIONS: Esperando respuesta inicial..."
-                
-                self.options_status_label.setText(status_text)
-                
-            else:
-                # Estado cuando el monitoreo está inactivo
-                self.led_indicator.setActive(False)
-                self.options_status_label.setText("Estado OPTIONS: Monitoreo inactivo")
-                self._last_monitoring_state = False
+                    self.latency_value.setText("-- ms")
+                    self.options_status_label.setText("Estado OPTIONS: Sin respuesta")
+
+                logger.debug(f"Actualizando UI con stats: {stats}")
+                logger.debug(f"LED activo: {has_recent_ok and has_rtt and not has_timeout}")
 
         except Exception as e:
-            print(f"Error en update_status: {str(e)}")
-            # Opcional: registrar el error en el terminal
-            self.log_message(f"Error actualizando estado: {str(e)}")
+            logger.error(f"Error en update_status: {e}")
+            self.log_message.emit(f"Error actualizando estado: {str(e)}")
 
     def toggle_server(self, checked):
-        """Inicia o detiene el servidor SIP."""
-        print(f"Debug: toggle_server llamado con estado: {checked}")
+        """Maneja el cambio de estado del servidor."""
+        logger.debug(f"toggle_server llamado con checked={checked}")
+        
         if checked:
+            # Intentar iniciar el servidor
+            self.reset_counters()
             if self.validate_config():
                 try:
                     config = self.get_config()
-                    self.sip_monitor = SIPMonitor()
-                    print(f"Debug: Iniciando servidor con config: {config}")
+                    logger.debug(f"Iniciando servidor con config: {config}")
                     
-                    success = self.sip_monitor.start_server(
-                        config['local_ip'],
-                        config['local_port'],
-                        config['transport']
-                    )
+                    # Añadir call_handler a la configuración
+                    config['call_handler'] = self.call_handler
+                    logger.debug(f"Call handler añadido a config: {self.call_handler}")
                     
-                    if success:
-                        print("Debug: Servidor iniciado con éxito")
+                    # Actualizar configuración del monitor
+                    self.sip_monitor.config = config.copy()
+                    
+                    # Iniciar el servidor
+                    if self.sip_monitor.start_server(config):
+                        # Actualizar UI
                         self.server_button.setText("Detener Servidor")
-                        self.server_status_label.setText(
-                            f"Estado: Escuchando en {config['local_ip']}:{config['local_port']}"
-                        )
-                        self.log_message.emit(
-                            f"Servidor SIP iniciado en {config['local_ip']}:{config['local_port']}"
-                        )
-                        
-                        # Inicializar trunk
-                        self.trunk = self.initialize_trunk_manager()
-                        if self.trunk:
-                            print("Debug: Trunk inicializado correctamente")
-                            # Inicializar el manejador de llamadas
-                            try:
-                                from src.core.sip_call_handler import SIPCallHandler
-                                self.call_handler = SIPCallHandler({
-                                    'trunk': self.trunk,  # Usar el trunk inicializado
-                                    'local_ip': config['local_ip'],
-                                    'local_port': config['local_port'],
-                                    'remote_ip': config['remote_ip'],
-                                    'remote_port': config['remote_port'],
-                                    'transport': config['transport']
-                                })
-                                print("Debug: Manejador de llamadas inicializado correctamente")
-                            except Exception as call_error:
-                                print(f"Debug: Error inicializando manejador de llamadas: {call_error}")
-                        else:
-                            print("Debug: Error inicializando trunk")
-                            
-                        # Deshabilitar campos de configuración
-                        self.local_ip_edit.setEnabled(False)
-                        self.local_port_spin.setEnabled(False)
-                        self.transport_combo.setEnabled(False)
-                        
+                        self.server_status_label.setText("Estado: Activo")
+                        self.log_message.emit(f"Servidor SIP iniciado en {config['local_ip']}:{config['local_port']}")
+                        self.enable_call_control.emit(True)
+                        self.call_control_panel.setVisible(True)
+                        return
                     else:
-                        print("Debug: Error al iniciar servidor")
-                        self.server_button.setChecked(False)
-                        self.log_message.emit("Error al iniciar el servidor SIP")
-                        
+                        raise Exception("No se pudo iniciar el servidor")
+                    
                 except Exception as e:
-                    print(f"Debug: Excepción al iniciar servidor: {e}")
-                    self.server_button.setChecked(False)
-                    self.log_message.emit(f"Error al iniciar el servidor: {str(e)}")
-                    self.server_status_label.setText("Estado: Error al iniciar")
-            else:
-                print("Debug: Configuración no válida")
-                self.server_button.setChecked(False)
-        else:
-            print("Debug: Deteniendo servidor")
-            self.sip_monitor.stop_server()
+                    logger.error(f"Error iniciando servidor: {str(e)}", exc_info=True)
+                    self.handle_error(f"Error iniciando servidor: {str(e)}", True)
             
-            if hasattr(self, 'call_handler'):
-                print("Debug: Limpiando manejador de llamadas")
-                delattr(self, 'call_handler')
-            
-            if hasattr(self, 'trunk'):
-                delattr(self, 'trunk')
-                
+            # Si llegamos aquí, hubo un error - restaurar estado del botón
+            self.server_button.blockSignals(True)  # Evitar recursión
+            self.server_button.setChecked(False)
             self.server_button.setText("Iniciar Servidor")
-            self.server_status_label.setText("Estado: Detenido")
-            self.log_message.emit("Servidor SIP detenido")
-            
-            self.local_ip_edit.setEnabled(True)
-            self.local_port_spin.setEnabled(True)
-            self.transport_combo.setEnabled(True)
-    
+            self.server_button.blockSignals(False)
+        
+        else:
+            # Intentar detener el servidor
+            try:
+                logger.debug("Deteniendo servidor...")
+                
+                # Detener monitoreo OPTIONS si está activo
+                if self.enable_options_cb.isChecked():
+                    self.enable_options_cb.setChecked(False)
+                
+                # Detener el servidor
+                if hasattr(self, 'sip_monitor') and self.sip_monitor is not None:
+                    self.sip_monitor.stop_server()
+                    
+                # Actualizar UI
+                self.server_button.setText("Iniciar Servidor")
+                self.server_status_label.setText("Estado: Detenido")
+                self.log_message.emit("Servidor SIP detenido")
+                self.enable_call_control.emit(False)
+                self.call_control_panel.setVisible(False)
+                
+                # Esperar un momento para asegurar que el socket se libera
+                time.sleep(0.5)
+                
+                logger.debug("Servidor detenido correctamente")
+                
+            except Exception as e:
+                logger.error(f"Error al detener servidor: {e}")
+                self.handle_error(f"Error al detener servidor: {str(e)}", True)
+            finally:
+                # Asegurar que el botón refleja el estado correcto
+                self.server_button.blockSignals(True)
+                self.server_button.setChecked(False)
+                self.server_button.setText("Iniciar Servidor")
+                self.server_button.blockSignals(False)
+
     def handle_single_call(self):
         """Maneja una llamada individual."""
         try:
@@ -664,11 +611,252 @@ class NetworkPanel(QWidget):
 
     def cleanup(self):
         """Limpia recursos antes de cerrar."""
-        print("Debug: Iniciando limpieza de recursos")
-        if hasattr(self, 'update_timer'):
-            self.update_timer.stop()
-        if hasattr(self, 'sip_monitor'):
-            self.sip_monitor.stop_options_monitoring()
-            self.sip_monitor.stop_server()
-        print("Debug: Limpieza completada")
+        try:
+            logger.debug("Iniciando limpieza de NetworkPanel")
+            
+            # Detener timer de actualización
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
+            
+            # Limpiar call handler primero
+            if hasattr(self, 'call_handler'):
+                self.call_handler.cleanup()
+            
+            # Luego detener el monitor
+            if hasattr(self, 'sip_monitor'):
+                self.sip_monitor.stop_options_monitoring()
+                self.sip_monitor.stop_server()
+            
+            logger.debug("Limpieza de NetworkPanel completada")
+            
+        except Exception as e:
+            logger.error(f"Error durante cleanup de NetworkPanel: {e}")
+
+    def on_port_changed(self, value):
+        self.local_port = value
+
+    def on_remote_port_changed(self, value):
+        self.remote_port = value
+
+    def on_transport_changed(self, value):
+        self.transport = value.upper()  # Guardamos en mayúsculas para consistencia
+
+    def save_config(self):
+        """Guarda la configuración actual."""
+        config = {
+            'local_ip': self.local_ip,
+            'local_port': self.local_port,
+            'remote_ip': self.remote_ip,
+            'remote_port': self.remote_port,
+            'transport': self.transport
+        }
+        return config
+
+    def load_config(self, config: dict):
+        """Carga una configuración guardada."""
+        if config:
+            self.local_ip = config.get('local_ip', self.local_ip)
+            self.local_port = config.get('local_port', self.local_port)
+            self.remote_ip = config.get('remote_ip', self.remote_ip)
+            self.remote_port = config.get('remote_port', self.remote_port)
+            self.transport = config.get('transport', self.transport)
+            
+            # Actualizar UI
+            self.local_ip_edit.setText(self.local_ip)
+            self.local_port_spin.setValue(self.local_port)
+            self.remote_ip_edit.setText(self.remote_ip)
+            self.remote_port_spin.setValue(self.remote_port)
+            self.transport_combo.setCurrentText(self.transport)
+
+    def handle_error(self, error_msg: str, show_dialog: bool = False):
+        """Maneja errores de manera centralizada."""
+        print(f"Debug: Error - {error_msg}")
+        self.log_message.emit(f"Error: {error_msg}")
+        
+        if show_dialog:
+            QMessageBox.critical(self, "Error", error_msg)
+
+    def is_port_available(self, port: int) -> bool:
+        """Verifica si un puerto está disponible."""
+        # Si el servidor ya está usando este puerto, considerarlo como disponible
+        if hasattr(self, 'sip_monitor') and hasattr(self.sip_monitor, '_server'):
+            return True
+            
+        try:
+            # Solo verificar si el puerto está en uso por otra aplicación
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                result = s.connect_ex(('127.0.0.1', port))
+                return result != 0
+        except OSError:
+            return False
+
+    def validate_config(self):
+        """Valida la configuración antes de iniciar el servidor."""
+        if not self.validate_ip(self.local_ip_edit.text()):
+            self.handle_error("IP local inválida", True)
+            return False
+            
+        if not self.validate_ip(self.remote_ip_edit.text()):
+            self.handle_error("IP remota inválida", True)
+            return False
+            
+        # Solo verificar el puerto si el servidor no está activo
+        if not hasattr(self, 'sip_monitor') or not hasattr(self.sip_monitor, '_server'):
+            if not self.is_port_available(self.local_port_spin.value()):
+                self.handle_error(f"El puerto {self.local_port_spin.value()} no está disponible", True)
+                return False
+            
+        return True
+
+    def test_network_connectivity(self):
+        """Prueba la conectividad básica de red con el servidor remoto."""
+        if not self.validate_config():
+            return
+            
+        config = self.get_config()
+        self.network_status_label.setText("Estado: Probando...")
+        self.test_network_btn.setEnabled(False)
+        
+        try:
+            if config['transport'].upper() == "UDP":
+                # Para UDP, solo verificamos que podamos crear y vincular un socket
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.settimeout(2)
+                    # Intentar vincular a una dirección local
+                    s.bind((config['local_ip'], 0))  # Puerto efímero
+                    # Intentar enviar un paquete vacío
+                    s.sendto(b"", (config['remote_ip'], config['remote_port']))
+                    success = True
+            else:
+                # Para TCP, intentar establecer conexión
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(2)
+                    result = s.connect_ex((config['remote_ip'], config['remote_port']))
+                    success = (result == 0)
+                
+            if success:
+                self.network_status_label.setText("Estado: Conectividad OK")
+                self.connectivity_status_changed.emit(True)
+                self.log_message.emit(
+                    f"Conectividad establecida con {config['remote_ip']}:{config['remote_port']}"
+                )
+            else:
+                self.network_status_label.setText("Estado: Error de Conectividad")
+                self.connectivity_status_changed.emit(False)
+                self.log_message.emit(
+                    f"Error de conectividad con {config['remote_ip']}:{config['remote_port']}"
+                )
+                    
+        except Exception as e:
+            self.network_status_label.setText("Estado: Error")
+            self.log_message.emit(f"Error al probar conectividad: {str(e)}")
+            self.connectivity_status_changed.emit(False)
+            
+        finally:
+            self.test_network_btn.setEnabled(True)
+
+    def is_ready_for_operation(self) -> bool:
+        """Verifica si el panel está listo para operaciones."""
+        if not self.local_ip or not self.remote_ip:
+            self.handle_error("Configuración de IPs incompleta", True)
+            return False
+            
+        if not self.validate_ip(self.local_ip) or not self.validate_ip(self.remote_ip):
+            self.handle_error("IPs configuradas no son válidas", True)
+            return False
+            
+        if not self.is_port_available(self.local_port_spin.value()):
+            self.handle_error(f"Puerto local {self.local_port_spin.value()} no disponible", True)
+            return False
+            
+        return True
+
+    def restore_defaults(self):
+        """Restaura la configuración a valores por defecto."""
+        self.local_ip = self._get_local_ip()
+        self.local_port = 5060
+        self.remote_ip = ""
+        self.remote_port = 5060
+        self.transport = "UDP"
+        
+        # Actualizar UI
+        self.local_ip_edit.setText(self.local_ip)
+        self.local_port_spin.setValue(self.local_port)
+        self.remote_ip_edit.setText(self.remote_ip)
+        self.remote_port_spin.setValue(self.remote_port)
+        self.transport_combo.setCurrentText(self.transport)
+
+    def reset_counters(self):
+        """Resetea todos los contadores de mensajes."""
+        try:
+            if hasattr(self, 'sip_monitor'):
+                # Solo intentar reset_stats si existe el método
+                if hasattr(self.sip_monitor, 'reset_stats'):
+                    self.sip_monitor.reset_stats()
+        except Exception as e:
+            print(f"Debug: Error reseteando estadísticas: {e}")
+        
+        # Actualizar UI independientemente del estado del monitor
+        self.sent_options.setText("OPTIONS Enviados: 0")
+        self.received_options.setText("OPTIONS Recibidos: 0")
+        self.sent_ok.setText("200 OK Enviados: 0")
+        self.received_ok.setText("200 OK Recibidos: 0")
+        self.timeouts.setText("Timeouts: 0")
+        self.latency_value.setText("-- ms")
+        self.led_indicator.setActive(False)
+
+    def setup_call_handler(self):
+        """Configura el manejador de llamadas."""
+        if self.call_handler:
+            # No conectar señales relacionadas con llamadas aquí
+            # Solo mantener las señales de monitorización
+            pass
+
+    def update_call_status(self, call_data: dict):
+        """Actualiza el estado de una llamada en la UI."""
+        try:
+            logger.debug(f"Actualizando estado de llamada: {call_data}")
+            # Actualizar la tabla de llamadas
+            self.add_call_to_table(
+                call_data['call_id'],
+                call_data['state'],
+                call_data['direction'],
+                call_data['from_uri'],
+                call_data['to_uri'],
+                call_data['start_time']
+            )
+        except Exception as e:
+            logger.error(f"Error actualizando estado de llamada: {e}")
+
+    def add_call_to_table(self, call_id: str, state: str, direction: str, from_uri: str, to_uri: str, start_time: str):
+        """Añade o actualiza una llamada en la tabla."""
+        try:
+            # Buscar si la llamada ya existe en la tabla
+            found = False
+            for row in range(self.calls_table.rowCount()):
+                if self.calls_table.item(row, 1).text() == call_id:  # Columna Call-ID
+                    # Actualizar fila existente
+                    self.calls_table.item(row, 2).setText(state)  # Estado
+                    found = True
+                    break
+                
+            if not found:
+                # Añadir nueva fila
+                row = self.calls_table.rowCount()
+                self.calls_table.insertRow(row)
+                
+                # Añadir datos
+                self.calls_table.setItem(row, 0, QTableWidgetItem(start_time))  # Hora
+                self.calls_table.setItem(row, 1, QTableWidgetItem(call_id))    # Call-ID
+                self.calls_table.setItem(row, 2, QTableWidgetItem(state))      # Estado
+                self.calls_table.setItem(row, 3, QTableWidgetItem(direction))  # Dirección
+                self.calls_table.setItem(row, 4, QTableWidgetItem(from_uri))   # Origen
+                self.calls_table.setItem(row, 5, QTableWidgetItem(to_uri))     # Destino
+                
+            logger.debug(f"Tabla actualizada para llamada {call_id} en estado {state}")
+            
+        except Exception as e:
+            logger.error(f"Error actualizando tabla de llamadas: {e}")
+
               

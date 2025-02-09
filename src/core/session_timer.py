@@ -1,9 +1,10 @@
-from typing import Optional
+from typing import Optional, Dict
 import threading
 import time
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from threading import Timer
 
 @dataclass
 class SessionState:
@@ -13,19 +14,23 @@ class SessionState:
    active: bool = True
 
 class SessionTimer:
-    def __init__(self, expires: int = 1800, min_se: int = 90):
+    def __init__(self, expires: int = 1800, min_se: int = 90, timeout=30):
         """
         Inicializa el manejador de Session Timers.
         
         Args:
             expires: Tiempo de expiración de sesión en segundos (default 1800s/30min)
             min_se: Mínimo Session-Expires aceptable en segundos (default 90s)
+            timeout: Tiempo de timeout en segundos (default 30s)
         """
         self.session_expires = expires
         self.min_se = min_se
         self.active_sessions = {}
         self.refresh_timer = None
         self.logger = logging.getLogger(__name__)
+        self._timeout = timeout
+        self._timer = None
+        self.sessions: Dict[str, datetime] = {}
 
     def start_session(self, call_id: str, refresher: str = 'uac') -> None:
         """Inicia timer para una nueva sesión."""
@@ -36,6 +41,7 @@ class SessionTimer:
             refresher=refresher
         )
         self._schedule_refresh(call_id)
+        self.sessions[call_id] = now
 
     def _schedule_refresh(self, call_id: str) -> None:
         """Programa el próximo refresh de la sesión."""
@@ -90,6 +96,7 @@ class SessionTimer:
         if call_id in self.active_sessions:
             self.active_sessions[call_id].last_refresh = datetime.now()
             self._schedule_refresh(call_id)
+            self.sessions[call_id] = datetime.now()
 
     def end_session(self, call_id: str) -> None:
         """Finaliza una sesión."""
@@ -98,6 +105,7 @@ class SessionTimer:
             if self.refresh_timer:
                 self.refresh_timer.cancel()
             del self.active_sessions[call_id]
+            del self.sessions[call_id]
 
     def get_headers(self) -> dict:
         """Retorna headers necesarios para Session Timer."""
@@ -140,3 +148,34 @@ class SessionTimer:
     def is_session_active(self, call_id: str) -> bool:
         """Verifica si una sesión está activa"""
         return call_id in self.active_sessions and self.active_sessions[call_id].active
+
+    def start(self):
+        self._timer = Timer(self._timeout, self._on_timeout)
+        self._timer.start()
+    
+    def reset(self):
+        if self._timer:
+            self._timer.cancel()
+        self.start()
+
+    def _on_timeout(self):
+        # Implementa la lógica para manejar el timeout
+        pass
+
+    def needs_refresh(self, call_id: str) -> bool:
+        """Verifica si una sesión necesita refresh."""
+        if call_id not in self.sessions:
+            return False
+            
+        last_refresh = self.sessions[call_id]
+        return datetime.now() - last_refresh > timedelta(seconds=900)
+        
+    def update_session(self, call_id: str):
+        """Actualiza el timestamp de una sesión."""
+        if call_id in self.sessions:
+            self.sessions[call_id] = datetime.now()
+            
+    def remove_session(self, call_id: str):
+        """Elimina una sesión."""
+        if call_id in self.sessions:
+            del self.sessions[call_id]

@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtGui import (QPainter, QColor, QPen, QBrush, QRadialGradient)
-from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, pyqtProperty
+from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, pyqtProperty, QTimer
 from src.ui.themes.cyber_theme import RetroCyberTheme
 
 class LedIndicator(QWidget):
@@ -12,6 +12,9 @@ class LedIndicator(QWidget):
        self._active = False
        self._blink = False
        self._opacity = 1.0
+       self._timer = QTimer()
+       self._timer.timeout.connect(self._update_blink)
+       self.setFixedSize(16, 16)
        
        self._blink_animation = QPropertyAnimation(self, b"opacity")
        self._blink_animation.setDuration(1000)
@@ -59,20 +62,17 @@ class LedIndicator(QWidget):
        self._border_color = QColor(color)
        self.update()
 
-   def setActive(self, active: bool):
-       if self._active != active:
-           self._active = active
-           self.update()
-           if self._blink:
-               self.toggle_blink(active)
-
-   def toggle_blink(self, enable: bool):
-       self._blink = enable
-       if enable:
-           self._blink_animation.start()
+   def setActive(self, active: bool, blink: bool = False):
+       self._active = active
+       self._blink = blink
+       if blink and active:
+           self._timer.start(500)
        else:
-           self._blink_animation.stop()
-           self.opacity = 1.0
+           self._timer.stop()
+       self.update()
+
+   def _update_blink(self):
+       self.opacity = 0.3 if self.opacity == 1.0 else 1.0
 
    def sizeHint(self) -> QSize:
        return QSize(24, 24)

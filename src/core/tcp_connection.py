@@ -13,216 +13,269 @@ class TCPConnection:
     Se integra con SIPTrunk para el manejo de conexiones persistentes.
     """
     
-    def __init__(self, socket: Optional[socket.socket] = None, 
-                addr: Optional[Tuple[str, int]] = None):
-        """
-        Inicializa una conexión TCP.
-        
-        Args:
-            socket: Socket TCP existente
-            addr: Tupla (host, port) de la conexión
-        """
-        self.socket = socket
-        self.addr = addr
-        self.buffer = b""  # Cambiado a bytes para mejor manejo de datos binarios
-        self.last_activity = time.time()
-        
-        # Control de buffer
-        self._max_buffer_size = 65535
-        self._cleanup_threshold = 32768
-        
-        # Estadísticas detalladas
+    def __init__(self):
+        self._socket = None
+        self._connected = False
+        self._last_error = None
+        self.buffer = ""
         self.stats = {
-            'bytes_sent': 0,
-            'bytes_received': 0,
-            'messages_processed': 0,
-            'incomplete_messages': 0,
-            'buffer_overflows': 0,
-            'connection_time': time.time(),
-            'last_cleanup': time.time()
+            'messages_sent': 0,
+            'messages_received': 0,
+            'last_activity': None,
+            'connection_time': None,
+            'reconnection_attempts': 0
         }
-        print(f"Debug: TCPConnection inicializada para {addr}")
+        self.max_buffer_size = 8192  # Aumentado para mensajes SIP más grandes
+        self._keep_alive_interval = 30  # segundos
+        self._last_keep_alive = None
 
-    def _extract_sip_messages(self) -> List[bytes]:
-        messages = []
-        while True:
-            # Buscar el final de los headers
-            header_end = self.buffer.find(b"\r\n\r\n")
-            if header_end == -1:
-                break
-                
-            headers_part = self.buffer[:header_end + 4]
-            headers = self._parse_headers(headers_part)
-            
-            # Obtener Content-Length
-            content_length = int(headers.get(b'Content-Length', b'0')[0]) if headers.get(b'Content-Length') else 0
-            
-            total_length = header_end + 4 + content_length
-            if len(self.buffer) < total_length:
-                break  # Mensaje incompleto
-                
-            full_message = self.buffer[:total_length]
-            messages.append(full_message)
-            self.buffer = self.buffer[total_length:]
-            
-        return messages
-
-    def _parse_headers(self, headers_part: bytes) -> Dict[bytes, List[bytes]]:
-        headers = {}
-        for line in headers_part.split(b'\r\n'):
-            if b':' in line:
-                name, value = line.split(b':', 1)
-                headers.setdefault(name.strip().lower(), []).append(value.strip())
-        return headers
-
-    def _decode_message(self, message: bytes) -> Optional[str]:
+    @property
+    def is_connected(self):
+        return self._connected and self._socket is not None
+        
+    def connect(self, host: str, port: int, timeout: int = 5) -> bool:
+        """Establece la conexión TCP."""
         try:
-            # Decodificar headers como UTF-8
-            header_part = message.split(b'\r\n\r\n')[0]
-            body_part = message[len(header_part)+4:]
+            if self.is_connected:
+                logger.debug("Ya existe una conexión activa")
+                return True
+
+            logger.debug(f"Conectando a {host}:{port}")
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket.settimeout(timeout)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             
-            headers = header_part.decode('utf-8')
-            body = body_part.decode(self._detect_encoding(headers))
+            # Intentar conexión
+            logger.debug(f"Intentando conexión TCP a {host}:{port}")
+            self._socket.connect((host, port))
             
-            return headers + '\r\n\r\n' + body
-        except UnicodeDecodeError as e:
-            logger.error(f"Error decodificando mensaje: {e}")
+            self._connected = True
+            self._last_host = host
+            self._last_port = port
+            self.stats['connection_time'] = datetime.now()
+            logger.debug("Conexión TCP establecida exitosamente")
+            return True
+            
+        except ConnectionRefusedError:
+            logger.error(f"Conexión rechazada por {host}:{port}")
+            self._connected = False
+            return False
+        except Exception as e:
+            logger.error(f"Error estableciendo conexión TCP: {e}")
+            self._connected = False
+            return False
+
+    def disconnect(self):
+        if self._socket:
+            try:
+                self._socket.close()
+            finally:
+                self._socket = None
+                self._connected = False
+
+    def receive_data(self, size: int = 4096) -> Optional[str]:
+        """Recibe datos del socket y los añade al buffer."""
+        try:
+            if not self._socket:
+                return None
+                
+            data = self._socket.recv(size)
+            if not data:
+                self._connected = False
+                return None
+                
+            decoded_data = data.decode('utf-8')
+            self.buffer += decoded_data
+            self.stats['messages_received'] += 1
+            self.stats['last_activity'] = datetime.now()
+            
+            # Verificar tamaño máximo del buffer
+            if len(self.buffer) > self.max_buffer_size:
+                self.buffer = self.buffer[-self.max_buffer_size:]
+                logger.warning("Buffer truncado por exceder tamaño máximo")
+                
+            return decoded_data
+            
+        except socket.timeout:
+            return None
+        except Exception as e:
+            self._last_error = str(e)
+            self._connected = False
             return None
 
-    def _detect_encoding(self, headers: str) -> str:
-        # Buscar Content-Type con charset
-        for line in headers.split('\r\n'):
-            if line.lower().startswith('content-type'):
-                if 'charset=' in line:
-                    return line.split('charset=')[1].split(';')[0].strip()
-        return 'utf-8'  # Default según RFC
-
-    def add_data(self, data: bytes) -> List[bytes]:
+    def parse_sip_message(self) -> Optional[Dict]:
+        """Parsea un mensaje SIP del buffer."""
         try:
-            self.buffer += data
-            self.stats['bytes_received'] += len(data)
-            
-            messages = self._extract_sip_messages()
-            logger.debug(f"Procesados {len(messages)} mensajes desde el buffer")
-            
-            # Limpieza periódica
-            if len(self.buffer) > self._max_buffer_size:
-                self._cleanup_buffer()
+            if '\r\n\r\n' not in self.buffer:
+                return None
                 
-            return messages
-        except Exception as e:
-            logger.error(f"Error crítico en add_data: {e}")
-            return []
-
-    def send_keepalive(self) -> bool:
-        """Envía CRLF keep-alive según RFC 5626"""
-        try:
-            self.socket.sendall(b"\r\n")
-            logger.debug("Keep-alive CRLF enviado")
-            return True
-        except socket.error as e:
-            logger.error(f"Error enviando keep-alive: {e}")
-            return False
-
-    def _process_messages(self) -> List[str]:
-        """
-        Procesa el buffer y extrae mensajes SIP completos.
-        Implementa detección de mensajes incompletos.
-        
-        Returns:
-            Lista de mensajes SIP completos
-        """
-        messages = []
-        start_time = time.time()
-        
-        while "\r\n\r\n" in self.buffer:
-            try:
-                message, remaining = self.buffer.split("\r\n\r\n", 1)
-                
-                # Verificar si el mensaje es válido
-                if self._is_valid_sip_message(message + "\r\n\r\n"):
-                    messages.append(message + "\r\n\r\n")
-                    self.buffer = remaining
-                    self.stats['messages_processed'] += 1
-                else:
-                    # Mensaje inválido, incrementar contador
-                    self.stats['incomplete_messages'] += 1
-                    # Avanzar buffer hasta el siguiente delimitador
-                    self.buffer = remaining
+            # Encontrar el final del mensaje
+            message, remaining = self.buffer.split('\r\n\r\n', 1)
+            
+            # Parsear la primera línea
+            lines = message.split('\r\n')
+            first_line = lines[0].split(' ')
+            
+            # Determinar tipo de mensaje
+            message_type = 'request' if first_line[0] in ['OPTIONS', 'REGISTER', 'INVITE'] else 'response'
+            
+            # Parsear headers
+            headers = {}
+            for line in lines[1:]:
+                if ': ' in line:
+                    key, value = line.split(': ', 1)
+                    headers[key.lower()] = value
                     
-            except Exception as e:
-                logger.error(f"Error procesando mensaje individual: {e}")
-                break
-                
-        return messages
-
-    def _is_valid_sip_message(self, message: bytes) -> bool:
-        try:
-            # Verificar línea de inicio (request o response)
-            first_line = message.split(b'\r\n')[0]
-            if not (first_line.startswith(b'SIP/2.0 ') or b' SIP/2.0' in first_line):
-                return False
-                
-            # Verificar headers obligatorios
-            headers = self._parse_headers(message)
-            required = [b'via', b'from', b'to', b'call-id', b'cseq']
-            return all(h in headers for h in required)
+            # Actualizar el buffer
+            self.buffer = remaining
+            
+            return {
+                'type': message_type,
+                'first_line': first_line,
+                'headers': headers,
+                'raw': message + '\r\n\r\n'
+            }
+            
         except Exception as e:
-            logger.error(f"Error validando mensaje: {e}")
-            return False
+            logger.error(f"Error parsing SIP message: {e}")
+            return None
 
-    def _cleanup_buffer(self):
-        if len(self.buffer) > self._max_buffer_size:
-            # Preservar los últimos 512 bytes que podrían contener headers
-            self.buffer = self.buffer[-512:]
-            self.stats['buffer_overflows'] += 1
-            logger.warning("Buffer truncado por exceso de tamaño")
+    def update_stats(self, event_type: str):
+        """Actualiza las estadísticas de la conexión."""
+        timestamp = datetime.now()
+        if event_type not in self.stats:
+            self.stats[event_type] = {
+                'count': 0,
+                'last_time': None,
+                'first_time': timestamp
+            }
+        
+        self.stats[event_type]['count'] += 1
+        self.stats[event_type]['last_time'] = timestamp
 
     def send_data(self, data: str) -> bool:
+        """Envía datos a través de la conexión TCP."""
         try:
-            encoded = data.encode('utf-8')
-            self.socket.sendall(encoded)
-            self.stats['bytes_sent'] += len(encoded)
-            logger.debug(f"Datos enviados a {self.addr}")
+            if not self._socket or not self._connected:
+                logger.error("Intento de envío sin conexión activa")
+                return False
+                
+            logger.debug(f"Enviando datos TCP: {data}")
+            self._socket.sendall(data.encode('utf-8'))
+            self.stats['messages_sent'] += 1
+            self.stats['last_activity'] = datetime.now()
             return True
-        except (BrokenPipeError, ConnectionResetError) as e:
-            logger.warning(f"Conexión cerrada por el peer: {e}")
-            return False
+            
         except Exception as e:
-            logger.error(f"Error inesperado en send_data: {e}")
+            self._last_error = str(e)
+            logger.error(f"Error enviando datos TCP: {e}")
+            self._connected = False
+            return False
+    
+    def keep_alive(self) -> bool:
+        """Verifica si la conexión sigue activa."""
+        try:
+            if not self._socket:
+                return False
+                
+            # Enviar un byte de keepalive
+            self._socket.send(b'\r\n')
+            self.update_stats('keepalive')
+            return True
+            
+        except Exception as e:
+            self._last_error = str(e)
+            logger.error(f"Error en keepalive: {e}")
+            self._connected = False
+            return False
+    
+    @property
+    def last_error(self) -> Optional[str]:
+        """Retorna el último error registrado."""
+        return self._last_error
+    
+    def get_stats(self) -> Dict:
+        """Retorna las estadísticas de la conexión."""
+        return {
+            'connected': self._connected,
+            'buffer_size': len(self.buffer),
+            'events': self.stats
+        }
+
+    def is_alive(self) -> bool:
+        """Verifica si la conexión está viva sin enviar datos."""
+        if not self._socket or not self._connected:
+            return False
+            
+        try:
+            # Verificar el estado del socket sin enviar datos
+            self._socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return True
+        except:
+            self._connected = False
             return False
 
     def get_connection_info(self) -> Dict:
-        """
-        Obtiene información detallada sobre la conexión.
-        
-        Returns:
-            Diccionario con información completa de la conexión
-        """
-        current_time = time.time()
-        return {
-            'peer_address': self.addr,
-            'last_activity': datetime.fromtimestamp(self.last_activity),
-            'connection_duration': current_time - self.stats['connection_time'],
-            'bytes_sent': self.stats['bytes_sent'],
-            'bytes_received': self.stats['bytes_received'],
-            'messages_processed': self.stats['messages_processed'],
-            'incomplete_messages': self.stats['incomplete_messages'],
-            'buffer_overflows': self.stats['buffer_overflows'],
-            'current_buffer_size': len(self.buffer),
-            'last_cleanup_age': current_time - self.stats['last_cleanup']
-        }
+        """Retorna información detallada sobre la conexión."""
+        if not self._socket:
+            return {'status': 'disconnected'}
+            
+        try:
+            local_addr = self._socket.getsockname()
+            remote_addr = self._socket.getpeername()
+            
+            return {
+                'status': 'connected' if self._connected else 'disconnected',
+                'local_address': f"{local_addr[0]}:{local_addr[1]}",
+                'remote_address': f"{remote_addr[0]}:{remote_addr[1]}",
+                'stats': self.stats,
+                'last_error': self._last_error
+            }
+        except:
+            return {'status': 'error', 'last_error': self._last_error}
 
-    def close(self):
-        print(f"Debug: Cerrando conexión para {self.addr}")
-        if self.socket:
-            try:
-                self.socket.close()
-                print("Debug: Socket cerrado correctamente")
-            except Exception as e:
-                print(f"Error cerrando socket: {e}")
-            self.socket = None
+    def maintain_connection(self):
+        """Mantiene la conexión TCP activa."""
+        if not self._last_keep_alive or \
+           (datetime.now() - self._last_keep_alive).seconds > self._keep_alive_interval:
+            if self.keep_alive():
+                self._last_keep_alive = datetime.now()
+            else:
+                self.reconnect()
 
-    def __del__(self):
-        """Limpieza al destruir el objeto."""
-        self.close()
+    def reconnect(self):
+        """Intenta reconectar si la conexión se pierde."""
+        if self._socket and self._connected:
+            return True
+
+        try:
+            self.stats['reconnection_attempts'] += 1
+            return self.connect(self._last_host, self._last_port)
+        except Exception as e:
+            self._last_error = f"Reconnection failed: {str(e)}"
+            return False
+
+    @classmethod
+    def from_existing_connection(cls, sock, address):
+        """Crea una instancia de TCPConnection desde una conexión existente."""
+        instance = cls()
+        instance._socket = sock
+        instance._connected = True
+        instance._last_host = address[0]
+        instance._last_port = address[1]
+        instance.stats['connection_time'] = datetime.now()
+        return instance
+
+    def handle_incoming_data(self) -> Optional[str]:
+        """Maneja datos entrantes en la conexión TCP."""
+        try:
+            data = self.receive_data()
+            if data:
+                logger.debug(f"Datos recibidos: {data}")
+                # Solo retornamos los datos, el manejo de OPTIONS se hace en el SIPTrunk
+                return data
+            return None
+        except Exception as e:
+            logger.error(f"Error manejando datos entrantes: {e}")
+            return None
