@@ -101,6 +101,7 @@ class SIPCallHandler(QObject):
 
     def __init__(self, config):
         super().__init__()
+        # Volver a la configuración directa
         self.config = config
         self.local_ip = config.get('local_ip', '127.0.0.1')
         self.local_port = config.get('local_port', 5060)
@@ -109,8 +110,8 @@ class SIPCallHandler(QObject):
         self.transport = config.get('transport', 'UDP')
         
         # Mantener una referencia fuerte al monitor
-        self._monitor = None  # Referencia principal
-        self._monitor_ref = None  # Referencia de respaldo
+        self._monitor = None
+        self._monitor_ref = None
         
         self.active_calls = {}
         self.rtp_sessions = {}
@@ -150,19 +151,27 @@ class SIPCallHandler(QObject):
         self._shutting_down = False  # Nueva bandera para control de cierre
         self._transaction_ids = set()  # Para rastrear transacciones únicas
 
+        logger.debug("=== INICIALIZACIÓN DE CALL HANDLER ===")
+        logger.debug(f"Configuración inicial: {config}")
+        logger.debug("Diccionario de llamadas inicializado")
+
     @property
     def sip_monitor(self):
-        """Getter para el monitor SIP."""
         return self._monitor
 
     @sip_monitor.setter
     def sip_monitor(self, monitor):
-        """Setter para el monitor SIP."""
-        logger.debug(f"Estableciendo monitor en call handler: {monitor}")
+        """Configura el monitor SIP y obtiene su configuración."""
         self._monitor = monitor
-        self._monitor_ref = monitor  # Mantener referencia de respaldo
-        if monitor is not None:
-            logger.debug(f"Monitor establecido con config: {monitor.config if hasattr(monitor, 'config') else 'Sin config'}")
+        if monitor and monitor.config:
+            # Actualizar la configuración y las IPs
+            self.config = monitor.config
+            self.local_ip = monitor.config.get('local_ip', self.local_ip)
+            self.remote_ip = monitor.config.get('remote_ip', self.remote_ip)
+            self.local_port = monitor.config.get('local_port', self.local_port)
+            self.remote_port = monitor.config.get('remote_port', self.remote_port)
+            self.transport = monitor.config.get('transport', self.transport)
+            logger.debug(f"Configuración actualizada - Local: {self.local_ip}, Remote: {self.remote_ip}")
 
     def send_message(self, message: bytes) -> bool:
         """Envía un mensaje SIP usando el monitor."""
@@ -217,27 +226,22 @@ class SIPCallHandler(QObject):
         self._cleanup_call(call.call_id)
         self.call_failed.emit(call.call_id, reason)
 
-    def _update_stats(self, active: int = None, failed: int = None, total: int = None):
-        """Actualiza y emite las estadísticas de llamadas."""
+    def _update_stats(self):
+        """Actualiza las estadísticas de llamadas."""
         try:
-            # Si no se proporcionan argumentos, usar los valores actuales
-            if active is None:
-                active = len([c for c in self.active_calls.values() 
-                            if c.state not in [CallState.TERMINATED.value, CallState.FAILED.value]])
-            if failed is None:
-                failed = self.stats["failed"]
-            if total is None:
-                total = len(self.active_calls)
-
-            # Actualizar estadísticas
+            active = len([c for c in self.active_calls.values() 
+                         if c.state not in ['TERMINATED', 'FAILED']])
+            failed = len([c for c in self.active_calls.values() 
+                         if c.state == 'FAILED'])
+            total = len(self.active_calls)
+            
+            logger.debug(f"Actualizando estadísticas - Activas: {active}, Fallidas: {failed}, Total: {total}")
+            
             self.stats["active"] = active
             self.stats["failed"] = failed
             self.stats["total"] = total
-
-            # Emitir señal con las estadísticas actualizadas
-            logger.debug(f"Emitiendo estadísticas - Activas: {active}, Fallidas: {failed}, Total: {total}")
-            self.call_stats_updated.emit(active, failed, total)
             
+            self.call_stats_updated.emit(active, failed, total)
         except Exception as e:
             logger.error(f"Error actualizando estadísticas: {e}")
 
@@ -253,42 +257,70 @@ class SIPCallHandler(QObject):
         except Exception:
             return ""
 
-    def _create_invite(self, from_uri: str, to_uri: str) -> str:
-        """Crea un mensaje INVITE SIP con SDP."""
-        call_id = f"{uuid.uuid4()}@{self.config['local_ip']}"
-        branch = f"z9hG4bK-{uuid.uuid4().hex[:16]}"
-        from_tag = uuid.uuid4().hex[:8]
-        
-        # Crear SDP
-        sdp = (
-            "v=0\r\n"
-            f"o=- {int(time.time())} 1 IN IP4 {self.config['local_ip']}\r\n"
-            "s=Call\r\n"
-            f"c=IN IP4 {self.config['local_ip']}\r\n"
-            "t=0 0\r\n"
-            "m=audio 10000 RTP/AVP 0 8 101\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            "a=rtpmap:101 telephone-event/8000\r\n"
-            "a=fmtp:101 0-15\r\n"
-            "a=ptime:20\r\n"
-        )
-        
-        message = (
-            f"INVITE sip:{to_uri}@{self.config['remote_ip']} SIP/2.0\r\n"
-            f"Via: SIP/2.0/{self.config['transport']} {self.config['local_ip']}:{self.config['local_port']};branch={branch}\r\n"
-            f"From: <sip:{from_uri}@{self.config['local_ip']}>;tag={from_tag}\r\n"
-            f"To: <sip:{to_uri}@{self.config['remote_ip']}>\r\n"
-            f"Call-ID: {call_id}\r\n"
-            "CSeq: 1 INVITE\r\n"
-            f"Contact: <sip:{from_uri}@{self.config['local_ip']}:{self.config['local_port']}>\r\n"
-            "Content-Type: application/sdp\r\n"
-            f"Content-Length: {len(sdp)}\r\n"
-            "\r\n"
-            f"{sdp}"
-        )
-        
-        return message
+    def _create_invite_message(self, call: SIPCall) -> str:
+        """Crea un mensaje INVITE con SDP."""
+        try:
+            # Validar que tenemos las IPs necesarias
+            if not self.remote_ip or not self.local_ip:
+                logger.error(f"IPs no configuradas correctamente - Local: {self.local_ip}, Remote: {self.remote_ip}")
+                return ""
+            
+            # Generar SDP
+            sdp = self._create_sdp_body(call)
+            
+            # Construir Request-URI y headers con formato correcto
+            request_uri = f"sip:{call.to_uri}@{self.remote_ip}"
+            from_uri = f"<sip:{call.from_uri}@{self.local_ip}>"
+            to_uri = f"<sip:{call.to_uri}@{self.remote_ip}>"
+            contact = f"<sip:{call.from_uri}@{self.local_ip}:{self.local_port}>"
+            
+            message = (
+                f"INVITE {request_uri} SIP/2.0\r\n"
+                f"Via: SIP/2.0/{self.transport} {self.local_ip}:{self.local_port}"
+                f";branch={call.branch}\r\n"
+                f"From: {from_uri};tag={call.from_tag}\r\n"
+                f"To: {to_uri}\r\n"
+                f"Call-ID: {call.call_id}\r\n"
+                f"CSeq: {call.cseq} INVITE\r\n"
+                f"Contact: {contact}\r\n"
+                "Max-Forwards: 70\r\n"
+                "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\n"
+                "Supported: timer, 100rel\r\n"
+                "Content-Type: application/sdp\r\n"
+                f"Content-Length: {len(sdp)}\r\n"
+                f"\r\n{sdp}"
+            )
+            
+            logger.debug(f"INVITE creado:\n{message}")
+            return message
+            
+        except Exception as e:
+            logger.error(f"Error creando INVITE: {e}")
+            return ""
+
+    def _create_sdp_body(self, call: SIPCall) -> str:
+        """Crea el cuerpo SDP para el INVITE."""
+        try:
+            timestamp = int(time.time())
+            sdp = (
+                "v=0\r\n"
+                f"o=PySIPP {call.call_id} {timestamp} IN IP4 {self.local_ip}\r\n"
+                "s=PySIPP Call\r\n"
+                f"c=IN IP4 {self.local_ip}\r\n"
+                "t=0 0\r\n"
+                f"m=audio {call.local_rtp_port} RTP/AVP 0 8 101\r\n"
+                "a=rtpmap:0 PCMU/8000\r\n"
+                "a=rtpmap:8 PCMA/8000\r\n"
+                "a=rtpmap:101 telephone-event/8000\r\n"
+                "a=fmtp:101 0-15\r\n"
+                "a=ptime:20\r\n"
+                "a=sendrecv\r\n"
+            )
+            return sdp
+            
+        except Exception as e:
+            logger.error(f"Error creando SDP: {e}")
+            return ""
 
     def handle_incoming_invite(self, invite_message: str):
         """Maneja INVITE entrante."""
@@ -299,6 +331,7 @@ class SIPCallHandler(QObject):
             call_id = self._extract_header(invite_message, "Call-ID")
             from_header = self._extract_header(invite_message, "From")
             to_header = self._extract_header(invite_message, "To")
+            contact = self._extract_header(invite_message, "Contact")
             
             if not all([call_id, from_header, to_header]):
                 logger.error("Headers requeridos no encontrados en INVITE")
@@ -308,11 +341,18 @@ class SIPCallHandler(QObject):
             from_uri = self._extract_uri(from_header)
             to_uri = self._extract_uri(to_header)
             
+            # Verificar si ya existe la llamada
+            if call_id in self.active_calls:
+                logger.warning(f"INVITE recibido para llamada existente: {call_id}")
+                return
+            
             # Crear nueva llamada
-            call = SIPCall(from_uri=from_uri, to_uri=to_uri)
-            call.call_id = call_id
-            call.direction = 'inbound'
-            call.state = CallState.TRYING.value
+            call = SIPCall(
+                from_uri=from_uri,
+                to_uri=to_uri,
+                call_id=call_id,
+                direction='inbound'
+            )
             
             # Extraer from_tag
             if ';tag=' in from_header:
@@ -323,63 +363,66 @@ class SIPCallHandler(QObject):
             
             # Registrar llamada
             self.active_calls[call_id] = call
-            
-            # Enviar 100 Trying
-            trying = self._create_response(invite_message, 100, "Trying")
-            self.send_message(trying.encode())
-            
-            # Enviar 180 Ringing
-            ringing = self._create_response(invite_message, 180, "Ringing")
-            self.send_message(ringing.encode())
-            
-            # Enviar 200 OK con SDP
-            ok_response = self._create_ok_response(invite_message, call)
-            self.send_message(ok_response.encode())
-            
-            # Actualizar estado
+            call.state = CallState.TRYING.value
             self._update_call_state(call_id, call.state)
+            
+            # Enviar respuestas en secuencia
+            self._send_trying(call)
+            time.sleep(0.5)  # Pequeña pausa
+            self._send_ringing(call)
+            time.sleep(1)  # Simular tiempo de ring
+            self._send_ok(call)
+            
+            logger.debug(f"Procesamiento de INVITE completado para llamada {call_id}")
             
         except Exception as e:
             logger.error(f"Error procesando INVITE entrante: {e}")
 
-    def _create_response(self, request: str, code: int, reason: str) -> str:
-        """Crea una respuesta SIP."""
+    def _send_trying(self, call: SIPCall):
+        """Envía respuesta 100 Trying."""
         try:
-            # Extraer headers necesarios
-            via = self._extract_header(request, "Via")
-            from_header = self._extract_header(request, "From")
-            to_header = self._extract_header(request, "To")
-            call_id = self._extract_header(request, "Call-ID")
-            cseq = self._extract_header(request, "CSeq")
-            
-            # Construir respuesta
-            response = [
-                f"SIP/2.0 {code} {reason}",
-                f"Via: {via}",
-                f"From: {from_header}",
-                f"To: {to_header}",
-                f"Call-ID: {call_id}",
-                f"CSeq: {cseq}",
-                f"Contact: <sip:{self.config['local_ip']}:{self.config['local_port']}>",
-                "Content-Length: 0",
-                "",
-                ""
-            ]
-            
-            return "\r\n".join(response)
-            
+            response = (
+                "SIP/2.0 100 Trying\r\n"
+                f"Via: {call.via}\r\n"
+                f"From: {call.from_header}\r\n"
+                f"To: {call.to_header}\r\n"
+                f"Call-ID: {call.call_id}\r\n"
+                f"CSeq: {call.cseq} INVITE\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            self.send_message(response.encode())
+            logger.debug(f"100 Trying enviado para llamada {call.call_id}")
         except Exception as e:
-            logger.error(f"Error creando respuesta: {e}")
-            return ""
+            logger.error(f"Error enviando 100 Trying: {e}")
 
-    def _create_ok_response(self, invite_message: str, call: SIPCall) -> str:
-        """Crea una respuesta 200 OK con SDP."""
+    def _send_ringing(self, call: SIPCall):
+        """Envía respuesta 180 Ringing."""
         try:
-            headers = self._extract_all_headers(invite_message)
+            response = (
+                "SIP/2.0 180 Ringing\r\n"
+                f"Via: {call.via}\r\n"
+                f"From: {call.from_header}\r\n"
+                f"To: {call.to_header};tag={call.to_tag}\r\n"
+                f"Call-ID: {call.call_id}\r\n"
+                f"CSeq: {call.cseq} INVITE\r\n"
+                f"Contact: <sip:{call.to_uri}@{self.local_ip}:{self.local_port}>\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            self.send_message(response.encode())
+            call.state = CallState.RINGING.value
+            self._update_call_state(call.call_id, call.state)
+            logger.debug(f"180 Ringing enviado para llamada {call.call_id}")
+        except Exception as e:
+            logger.error(f"Error enviando 180 Ringing: {e}")
+
+    def _send_ok(self, call: SIPCall):
+        """Envía respuesta 200 OK según RFC 3261."""
+        try:
+            headers = self._extract_all_headers(call)
             call_id = headers.get('call-id')
             if call_id not in self.active_calls:
                 logger.error("No se encontró la llamada para enviar 200 OK")
-                return ""
+                return
                 
             call = self.active_calls[call_id]
             call.rtp_port = self._get_next_rtp_port()
@@ -407,11 +450,11 @@ class SIPCallHandler(QObject):
                 f"{sdp}"
             )
             
-            return response
+            self.send_message(response.encode())
+            logger.debug("200 OK con SDP enviado")
             
         except Exception as e:
-            logger.error(f"Error creando 200 OK: {e}")
-            return ""
+            logger.error(f"Error enviando 200 OK: {e}")
 
     def terminate_call(self, call_id: str):
         """Termina una llamada específica."""
@@ -426,85 +469,37 @@ class SIPCallHandler(QObject):
             except Exception as e:
                 logger.error(f"Error terminando llamada {call_id}: {e}")
 
-    def _update_call_state(self, call_id: str, state: str):
-        """Actualiza el estado de una llamada y emite señales."""
-        if call_id in self.active_calls and not self._shutting_down:
-            try:
+    def _update_call_state(self, call_id: str, new_state: str):
+        """Actualiza el estado de una llamada."""
+        try:
+            if call_id in self.active_calls:
                 call = self.active_calls[call_id]
                 old_state = call.state
-                call.state = state
+                call.state = new_state
                 
-                # Actualizar estadísticas
-                if state == CallState.ESTABLISHED.value:
-                    self.stats["active"] += 1
-                elif state == CallState.FAILED.value:
-                    self.stats["failed"] += 1
-                    self.stats["active"] -= 1
-                elif state == CallState.TERMINATED.value:
-                    self.stats["active"] -= 1
-                    
-                self.stats["total"] = len(self.active_calls)
+                logger.debug(f"Llamada {call_id} cambió de estado: {old_state} -> {new_state}")
                 
-                # Emitir señal
+                # Si el estado es final, programar limpieza
+                if new_state in ['TERMINATED', 'FAILED']:
+                    logger.debug(f"Estado final alcanzado para llamada {call_id}, programando limpieza")
+                    self.active_calls.pop(call_id, None)
+                    self._update_stats()
+                
+                # Emitir señal de actualización
                 self.call_status_changed.emit({
                     'call_id': call_id,
-                    'state': self.call_states.get(state, state),
+                    'state': new_state,
                     'from_uri': call.from_uri,
-                    'to_uri': call.to_uri,
-                    'start_time': call.start_time.strftime('%H:%M:%S'),
-                    'direction': call.direction
+                    'to_uri': call.to_uri
                 })
                 
-                self._update_stats()
-                logger.debug(f"Estado de llamada actualizado - ID: {call_id}, Estado anterior: {old_state}, Nuevo estado: {state}")
-                
-            except Exception as e:
-                logger.error(f"Error actualizando estado de llamada {call_id}: {e}")
+        except Exception as e:
+            logger.error(f"Error actualizando estado de llamada: {e}")
 
     def _create_bye(self, call_id: str) -> str:
         """Crea un mensaje BYE para una llamada."""
         # Implementar creación de mensaje BYE
         pass
-
-    def _send_trying(self, invite_message: str):
-        """Envía respuesta 100 Trying."""
-        try:
-            headers = self._extract_all_headers(invite_message)
-            response = (
-                "SIP/2.0 100 Trying\r\n"
-                f"Via: {headers.get('via', '')}\r\n"
-                f"From: {headers.get('from', '')}\r\n"
-                f"To: {headers.get('to', '')}\r\n"
-                f"Call-ID: {headers.get('call-id', '')}\r\n"
-                f"CSeq: {headers.get('cseq', '')}\r\n"
-                "Content-Length: 0\r\n\r\n"
-            )
-            self.send_message(response.encode())
-        except Exception as e:
-            logger.error(f"Error enviando 100 Trying: {e}")
-
-    def _send_ringing(self, invite_message: str):
-        """Envía respuesta 180 Ringing."""
-        try:
-            headers = self._extract_all_headers(invite_message)
-            to_tag = uuid.uuid4().hex[:8]  # Generar tag para To
-            
-            response = (
-                "SIP/2.0 180 Ringing\r\n"
-                f"Via: {headers.get('via', '')}\r\n"
-                f"From: {headers.get('from', '')}\r\n"
-                f"To: {headers.get('to', '')};tag={to_tag}\r\n"
-                f"Call-ID: {headers.get('call-id', '')}\r\n"
-                f"CSeq: {headers.get('cseq', '')}\r\n"
-                f"Contact: <sip:{self.local_ip}:{self.local_port}>\r\n"
-                "Content-Length: 0\r\n\r\n"
-            )
-            
-            logger.debug(f"Enviando 180 Ringing:\n{response}")
-            self.send_message(response.encode())
-            
-        except Exception as e:
-            logger.error(f"Error enviando 180 Ringing: {e}")
 
     def _send_ok(self, invite_message: str):
         """Envía respuesta 200 OK según RFC 3261."""
@@ -569,90 +564,83 @@ class SIPCallHandler(QObject):
         return ""
 
     def start_single_call(self, from_uri: str, to_uri: str) -> bool:
-        """Inicia una llamada saliente."""
+        """Inicia una llamada única."""
         try:
-            logger.debug("="*50)
-            logger.debug("INICIANDO NUEVA LLAMADA")
+            logger.debug(f"=== INICIANDO NUEVA LLAMADA ===")
+            logger.debug(f"From: {from_uri}, To: {to_uri}")
+            logger.debug(f"Estado actual del diccionario de llamadas: {len(self.active_calls)} llamadas")
+            for call_id, call in self.active_calls.items():
+                logger.debug(f"Llamada {call_id}: {call.from_uri}->{call.to_uri} [Estado: {call.state}]")
             
-            # Verificar llamadas existentes
-            for call in self.active_calls.values():
-                if (call.from_uri == from_uri and call.to_uri == to_uri and 
-                    call.state not in [CallState.TERMINATED.value, CallState.FAILED.value]):
-                    logger.warning("Ya existe una llamada activa con estos URIs")
-                    return False
-
+            # Limpiar el diccionario de llamadas al inicio
+            self.active_calls.clear()
+            self._update_stats()
+            logger.debug("Diccionario de llamadas limpiado")
+            
             # Crear nueva llamada
             call = SIPCall(from_uri=from_uri, to_uri=to_uri)
-            call.direction = 'outbound'
-            call.state = CallState.INITIAL.value
-            call.from_tag = uuid.uuid4().hex[:8]
-            call.cseq = 1
+            logger.debug(f"Nueva llamada creada con ID: {call.call_id}")
             
-            # Crear y enviar INVITE
-            invite_msg = self._create_invite(from_uri, to_uri)
-            logger.debug(f"INVITE creado para llamada {call.call_id}")
-            
-            # Registrar la llamada antes de enviar
-            self.active_calls[call.call_id] = call
-            
-            # Enviar INVITE una sola vez
-            if not self.send_message(invite_msg.encode()):
-                logger.error("Error enviando INVITE")
-                self._handle_call_failure(call)
+            # Enviar INVITE y registrar llamada si es exitoso
+            if self._send_invite(call):
+                self.active_calls[call.call_id] = call
+                self._update_call_state(call.call_id, CallState.INITIAL.value)
+                logger.debug(f"INVITE enviado y llamada registrada: {call.call_id}")
+                return True
+            else:
+                logger.error("Error enviando INVITE - llamada no registrada")
                 return False
                 
-            # Iniciar timer de transacción
-            self._start_transaction_timer(call)
-            
-            logger.debug(f"INVITE enviado correctamente para llamada {call.call_id}")
-            self._update_call_state(call.call_id, CallState.INITIAL.value)
-            return True
-            
         except Exception as e:
             logger.error(f"Error iniciando llamada: {e}")
             return False
 
-    def _create_invite_message(self, call: SIPCall) -> str:
-        """Crea un mensaje INVITE."""
+    def _force_cleanup_calls(self):
+        """Fuerza la limpieza de todas las llamadas en estados finales."""
         try:
-            # Crear SDP según RFC 4566
-            sdp = (
-                "v=0\r\n"
-                f"o=pysipp {self.next_origin} {self.next_origin} IN IP4 {self.local_ip}\r\n"
-                "s=pysipp\r\n"
-                f"c=IN IP4 {self.local_ip}\r\n"
-                "t=0 0\r\n"
-                f"m=audio {call.local_rtp_port} RTP/AVP 0 8 101\r\n"
-                "a=rtpmap:0 PCMU/8000\r\n"
-                "a=rtpmap:8 PCMA/8000\r\n"
-                "a=rtpmap:101 telephone-event/8000\r\n"
-                "a=fmtp:101 0-16\r\n"
-                "a=sendrecv\r\n"
-            )
+            # Limpiar todas las llamadas en estados finales
+            for call_id in list(self.active_calls.keys()):
+                call = self.active_calls[call_id]
+                if call.state in ['TERMINATED', 'FAILED']:
+                    logger.debug(f"Forzando limpieza de llamada {call_id} en estado {call.state}")
+                    del self.active_calls[call_id]
+                    self._update_stats()
             
-            # Crear INVITE con todos los headers necesarios
-            invite = (
-                f"INVITE sip:{call.to_uri}@{self.remote_ip} SIP/2.0\r\n"
-                f"Via: SIP/2.0/{self.transport} {self.local_ip}:{self.local_port};branch={call.branch}\r\n"
-                f"From: <sip:{call.from_uri}@{self.local_ip}>;tag={call.from_tag}\r\n"
-                f"To: <sip:{call.to_uri}@{self.remote_ip}>\r\n"
-                f"Call-ID: {call.call_id}\r\n"
-                f"CSeq: {call.cseq} INVITE\r\n"
-                f"Contact: <sip:{call.from_uri}@{self.local_ip}:{self.local_port}>\r\n"
-                "Max-Forwards: 70\r\n"
-                "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\n"
-                "Supported: 100rel, timer\r\n"
-                "Content-Type: application/sdp\r\n"
-                f"Content-Length: {len(sdp)}\r\n"
-                f"\r\n{sdp}"
-            )
+            # Verificar si quedaron llamadas
+            if self.active_calls:
+                logger.debug(f"Llamadas restantes después de limpieza: {len(self.active_calls)}")
+                for call_id, call in self.active_calls.items():
+                    logger.debug(f"Llamada {call_id}: {call.from_uri}->{call.to_uri} en estado {call.state}")
+        except Exception as e:
+            logger.error(f"Error en limpieza forzada: {e}")
+
+    def _send_invite(self, call: SIPCall) -> bool:
+        """Envía INVITE para una nueva llamada."""
+        try:
+            # Verificar que tenemos IP remota antes de intentar enviar
+            if not self.remote_ip:
+                logger.error("No se puede enviar INVITE - IP remota no configurada")
+                return False
+
+            invite_msg = self._create_invite_message(call)
+            if not invite_msg:
+                logger.error("Error creando mensaje INVITE")
+                return False
             
-            logger.debug(f"INVITE creado:\n{invite}")
-            return invite
+            # Enviar INVITE
+            if not self.send_message(invite_msg.encode()):
+                logger.error("Error enviando INVITE")
+                return False
+            
+            # Iniciar timer de transacción
+            self._start_transaction_timer(call)
+            
+            logger.debug(f"INVITE enviado correctamente para llamada {call.call_id}")
+            return True
             
         except Exception as e:
-            logger.error(f"Error creando INVITE: {e}", exc_info=True)
-            return ""
+            logger.error(f"Error enviando INVITE: {e}")
+            return False
 
     def start_call_burst(self, interval: int, max_calls: int):
         """Inicia una ráfaga de llamadas."""
@@ -878,15 +866,15 @@ class SIPCallHandler(QObject):
             
             # Construir ACK según RFC 3261
             ack_message = (
-                f"ACK sip:{call.to_uri}@{self.config['remote_ip']} SIP/2.0\r\n"
-                f"Via: SIP/2.0/{self.config['transport']} {self.config['local_ip']}:{self.config['local_port']}"
+                f"ACK sip:{call.to_uri}@{self.remote_ip} SIP/2.0\r\n"
+                f"Via: SIP/2.0/{self.transport} {self.local_ip}:{self.local_port}"
                 f";branch={ack_branch}\r\n"
-                f"From: <sip:{call.from_uri}@{self.config['local_ip']}>;tag={call.from_tag}\r\n"
-                f"To: <sip:{call.to_uri}@{self.config['remote_ip']}>;tag={call.to_tag}\r\n"
+                f"From: <sip:{call.from_uri}@{self.local_ip}>;tag={call.from_tag}\r\n"
+                f"To: <sip:{call.to_uri}@{self.remote_ip}>;tag={call.to_tag}\r\n"
                 f"Call-ID: {call.call_id}\r\n"
                 f"CSeq: {call.cseq} ACK\r\n"
                 "Max-Forwards: 70\r\n"
-                f"Contact: <sip:{call.from_uri}@{self.config['local_ip']}:{self.config['local_port']}>\r\n"
+                f"Contact: <sip:{call.from_uri}@{self.local_ip}:{self.local_port}>\r\n"
                 "Content-Length: 0\r\n\r\n"
             )
             
@@ -929,15 +917,15 @@ class SIPCallHandler(QObject):
             
             # Construir mensaje BYE según RFC 3261
             bye_message = (
-                f"BYE sip:{call.to_uri}@{self.config['remote_ip']} SIP/2.0\r\n"
-                f"Via: SIP/2.0/{self.config['transport']} {self.config['local_ip']}:{self.config['local_port']}"
+                f"BYE sip:{call.to_uri}@{self.remote_ip} SIP/2.0\r\n"
+                f"Via: SIP/2.0/{self.transport} {self.local_ip}:{self.local_port}"
                 f";branch={bye_branch}\r\n"
-                f"From: <sip:{call.from_uri}@{self.config['local_ip']}>;tag={call.from_tag}\r\n"
-                f"To: <sip:{call.to_uri}@{self.config['remote_ip']}>;tag={call.to_tag}\r\n"
+                f"From: <sip:{call.from_uri}@{self.local_ip}>;tag={call.from_tag}\r\n"
+                f"To: <sip:{call.to_uri}@{self.remote_ip}>;tag={call.to_tag}\r\n"
                 f"Call-ID: {call.call_id}\r\n"
                 f"CSeq: {call.cseq + 1} BYE\r\n"
                 "Max-Forwards: 70\r\n"
-                f"Contact: <sip:{call.from_uri}@{self.config['local_ip']}:{self.config['local_port']}>\r\n"
+                f"Contact: <sip:{call.from_uri}@{self.local_ip}:{self.local_port}>\r\n"
                 "Content-Length: 0\r\n\r\n"
             )
             
@@ -1129,3 +1117,22 @@ class SIPCallHandler(QObject):
     def _update_call_status(self, call_info: dict):
         # Implementa la lógica para actualizar la tabla de llamadas en NetworkPanel
         pass
+
+    def update_config(self, key: str, value: any):
+        """Actualiza un valor específico de la configuración."""
+        try:
+            self.config[key] = value
+            # Actualizar también los atributos específicos
+            if key == 'remote_ip':
+                self.remote_ip = value
+                logger.debug(f"IP remota actualizada en call handler: {value}")
+            elif key == 'local_ip':
+                self.local_ip = value
+            elif key == 'local_port':
+                self.local_port = value
+            elif key == 'remote_port':
+                self.remote_port = value
+            elif key == 'transport':
+                self.transport = value
+        except Exception as e:
+            logger.error(f"Error actualizando configuración: {e}")

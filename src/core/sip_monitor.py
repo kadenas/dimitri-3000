@@ -290,32 +290,38 @@ class SIPMonitor(QObject):
         try:
             message = data.decode('utf-8', errors='ignore')
             
-            # Ignorar mensajes propios
+            # Ignorar mensajes propios (desde nuestra IP)
             if addr[0] == self.config['local_ip']:
+                logger.debug(f"Ignorando mensaje desde IP local: {addr[0]}")
                 return
             
             logger.debug(f"Mensaje UDP recibido de {addr}:\n{message}")
             
-            # MONITORIZACIÓN: Manejar OPTIONS y sus respuestas
-            if "OPTIONS sip:" in message and addr[0] == self.config['remote_ip']:
+            # Procesar mensajes entrantes
+            if message.startswith("OPTIONS"):
                 # OPTIONS entrante
+                logger.debug("OPTIONS entrante detectado")
+                self._stats['options_received'] += 1
                 self._handle_options_message(message, addr)
                 return
             
-            if message.startswith("SIP/2.0") and "200 OK" in message and addr[0] == self.config['remote_ip']:
-                # Verificar si es respuesta a OPTIONS
+            elif message.startswith("SIP/2.0 200 OK"):
+                # Verificar si es respuesta a nuestro OPTIONS
                 cseq_line = next((line for line in message.split('\r\n') if line.startswith('CSeq:')), None)
                 if cseq_line and "OPTIONS" in cseq_line:
+                    logger.debug("200 OK entrante para OPTIONS")
+                    # Ya no incrementamos aquí ok_received, lo hacemos en _handle_options_response
                     self._handle_options_response(message)
                     return
-            
-            # LLAMADAS: Delegar al call_handler si existe
-            if self.call_handler:
-                if "INVITE" in message:
-                    self.call_handler.handle_incoming_invite(message)
-                elif message.startswith("SIP/2.0"):
-                    # Respuestas relacionadas con llamadas
+                elif cseq_line and "INVITE" in cseq_line and self.call_handler:
+                    # Respuesta a INVITE - pasar al call handler
+                    logger.debug("200 OK entrante para INVITE")
                     self.call_handler.handle_response(message)
+                    return
+                
+            # Si llegamos aquí, es otro tipo de mensaje SIP
+            if self.call_handler:
+                self.call_handler.handle_message(message, addr)
             
         except Exception as e:
             logger.error(f"Error procesando mensaje UDP: {e}")
@@ -324,18 +330,17 @@ class SIPMonitor(QObject):
         """Maneja SOLO respuestas a OPTIONS."""
         try:
             self._last_options_response_time = datetime.now()
-            self._stats['ok_received'] += 1
+            self._stats['ok_received'] += 1  # Solo incrementamos aquí
             
-            # Calcular RTT
-            if hasattr(self, '_last_options_sent_time'):
+            if self._last_options_sent_time:
                 rtt = (datetime.now() - self._last_options_sent_time).total_seconds() * 1000
                 self._last_rtt = rtt
                 self._stats['last_latency'] = rtt
-                logger.debug(f"RTT calculado: {rtt:.2f}ms")
+                logger.debug(f"Emitiendo RTT: {rtt:.2f} ms")
                 self.rtt_updated.emit(rtt)
             
+            logger.debug("Emitiendo actualización de estadísticas")
             self.stats_updated.emit()
-            logger.debug("Estadísticas de monitorización actualizadas")
             
         except Exception as e:
             logger.error(f"Error procesando respuesta OPTIONS: {e}")
@@ -572,20 +577,17 @@ class SIPMonitor(QObject):
                 self._udp_cseq += 1
             
             message = self._create_options_message()
-            if not message:
-                logger.error("Error creando mensaje OPTIONS")
-                return False
-            
             logger.debug(f"Enviando OPTIONS:\n{message}")
+            
             self._last_options_sent_time = datetime.now()
             
-            # Enviar mensaje
+            # Enviar mensaje y actualizar contador de enviados
             try:
                 self._server_socket.sendto(
                     message.encode(),
                     (self.config['remote_ip'], self.config['remote_port'])
                 )
-                self._stats['options_sent'] += 1
+                self._stats['options_sent'] += 1  # Solo incrementar al enviar
                 logger.debug("OPTIONS enviado correctamente")
                 
                 # Esperar respuesta con timeout
@@ -604,16 +606,22 @@ class SIPMonitor(QObject):
                 logger.warning(f"Timeout esperando respuesta OPTIONS ({timeout}s)")
                 self._stats['timeouts'] += 1
                 self._last_rtt = None
+                self._stats['last_latency'] = None
+                
                 self.rtt_updated.emit(0)
+                self.trunk_state_changed.emit("INACTIVE")
                 self.stats_updated.emit()
+                
                 return False
                 
             except Exception as e:
                 logger.error(f"Error enviando OPTIONS: {e}")
+                self.trunk_state_changed.emit("ERROR")
                 return False
             
         except Exception as e:
             logger.error(f"Error en _send_options_udp: {e}")
+            self.trunk_state_changed.emit("ERROR")
             return False
 
     def _parse_cseq(self, response: str) -> int:
@@ -845,7 +853,7 @@ class SIPMonitor(QObject):
     def _handle_options_message(self, message: str, addr: tuple):
         """Maneja SOLO mensajes OPTIONS entrantes."""
         try:
-            self._stats['options_received'] += 1
+            # Ya incrementamos options_received en _handle_udp_message
             
             response = self._create_options_response(message)
             if response:
@@ -855,7 +863,7 @@ class SIPMonitor(QObject):
                     return
                     
                 self._server_socket.sendto(encoded_response, addr)
-                self._stats['ok_sent'] += 1
+                self._stats['ok_sent'] += 1  # Incrementar contador de OK enviados
                 logger.debug("200 OK enviado para OPTIONS")
                 
             self.stats_updated.emit()

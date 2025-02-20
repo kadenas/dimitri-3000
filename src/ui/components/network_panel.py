@@ -59,7 +59,7 @@ class NetworkPanel(QWidget):
         
         # Crear y configurar el call handler
         self.call_handler = SIPCallHandler(initial_config)
-        self.call_handler.sip_monitor = self.sip_monitor  # Esto usará el nuevo setter
+        self.call_handler.sip_monitor = self.sip_monitor
         logger.debug("Call handler creado y configurado con monitor")
         
         # Crear y configurar el panel de control
@@ -205,8 +205,11 @@ class NetworkPanel(QWidget):
         # Layout superior para LED y latencia
         status_layout = QHBoxLayout()
         self.led_indicator = LedIndicator()
+        self.led_indicator.setFixedSize(20, 20)
+        self.led_indicator.setActive(False)
         latency_label = QLabel("Latencia:")
         self.latency_value = QLabel("-- ms")
+        status_layout.addWidget(QLabel("Estado:"))
         status_layout.addWidget(self.led_indicator)
         status_layout.addWidget(latency_label)
         status_layout.addWidget(self.latency_value)
@@ -246,6 +249,11 @@ class NetworkPanel(QWidget):
         server_layout.addWidget(self.server_button)
         server_layout.addWidget(self.server_status_label)
         server_group.setLayout(server_layout)
+        
+        # Reservar espacio para el panel de control de llamadas
+        self.call_control_container = QWidget()
+        call_control_layout = QVBoxLayout(self.call_control_container)
+        main_layout.addWidget(self.call_control_container)
         
         # Añadir todo al layout principal
         main_layout.addLayout(protocol_layout)
@@ -414,12 +422,20 @@ class NetworkPanel(QWidget):
         else:
             self.local_ip_edit.setStyleSheet("border: 1px solid red")
 
-    def on_remote_ip_changed(self, value):
-        if self.validate_ip(value):
-            self.remote_ip = value
-            self.remote_ip_edit.setStyleSheet("")
-        else:
-            self.remote_ip_edit.setStyleSheet("border: 1px solid red")
+    def on_remote_ip_changed(self):
+        """Maneja cambios en la IP remota."""
+        try:
+            new_ip = self.remote_ip_edit.text().strip()
+            if new_ip != self.remote_ip:
+                self.remote_ip = new_ip
+                # Actualizar configuración en monitor y call handler
+                if self.sip_monitor:
+                    self.sip_monitor.config['remote_ip'] = new_ip
+                if self.call_handler:
+                    self.call_handler.update_config('remote_ip', new_ip)
+                logger.debug(f"IP remota actualizada a: {new_ip}")
+        except Exception as e:
+            logger.error(f"Error actualizando IP remota: {e}")
 
     def toggle_options_monitoring(self, state):
         """Activa o desactiva el monitoreo OPTIONS."""
@@ -468,47 +484,27 @@ class NetworkPanel(QWidget):
             self.led_indicator.setActive(False)
 
     def update_status(self):
-        """Actualiza el estado mostrado en la interfaz."""
+        """Actualiza los contadores de estado."""
         try:
-            if not hasattr(self, 'sip_monitor') or self.sip_monitor is None:
+            if not self.sip_monitor:
                 return
-
-            stats = getattr(self.sip_monitor, 'stats', {})
             
-            if self.sip_monitor.is_monitoring:
-                # Actualizar contadores
-                self.sent_options.setText(f"OPTIONS Enviados: {stats.get('options_sent', 0)}")
-                self.received_options.setText(f"OPTIONS Recibidos: {stats.get('options_received', 0)}")
-                self.sent_ok.setText(f"200 OK Enviados: {stats.get('ok_sent', 0)}")
-                self.received_ok.setText(f"200 OK Recibidos: {stats.get('ok_received', 0)}")
-                self.timeouts.setText(f"Timeouts: {stats.get('timeouts', 0)}")
-                
-                # Verificar si hay respuestas OK recientes
-                has_recent_ok = stats.get('ok_received', 0) > 0
-                has_rtt = stats.get('last_latency') is not None
-                has_timeout = stats.get('timeouts', 0) > 0
-                
-                # Actualizar LED y latencia
-                if has_recent_ok and has_rtt and not has_timeout:
-                    # Si tenemos respuestas OK y RTT, mostrar estado activo
-                    self.led_indicator.setActive(True)
-                    self.latency_value.setText(f"{stats['last_latency']:.2f} ms")
-                    current_time = datetime.now().strftime('%H:%M:%S')
-                    self.options_status_label.setText(
-                        f"Estado OPTIONS: OK (Última respuesta: {current_time}, RTT: {stats['last_latency']:.2f}ms)"
-                    )
-                else:
-                    # Si no hay respuestas o hay timeout, mostrar estado inactivo
-                    self.led_indicator.setActive(False)
-                    self.latency_value.setText("-- ms")
-                    self.options_status_label.setText("Estado OPTIONS: Sin respuesta")
-
-                logger.debug(f"Actualizando UI con stats: {stats}")
-                logger.debug(f"LED activo: {has_recent_ok and has_rtt and not has_timeout}")
-
+            stats = self.sip_monitor._stats
+            logger.debug(f"Actualizando estadísticas: {stats}")
+            
+            # Actualizar contadores
+            self.sent_options.setText(f"OPTIONS Enviados: {stats['options_sent']}")
+            self.received_options.setText(f"OPTIONS Recibidos: {stats['options_received']}")
+            self.sent_ok.setText(f"200 OK Enviados: {stats['ok_sent']}")
+            self.received_ok.setText(f"200 OK Recibidos: {stats['ok_received']}")
+            self.timeouts.setText(f"Timeouts: {stats['timeouts']}")
+            
+            # Actualizar latencia si existe
+            if 'last_latency' in stats and stats['last_latency'] is not None:
+                self._update_latency(stats['last_latency'])
+            
         except Exception as e:
-            logger.error(f"Error en update_status: {e}")
-            self.log_message.emit(f"Error actualizando estado: {str(e)}")
+            logger.error(f"Error actualizando estado: {e}")
 
     def toggle_server(self, checked):
         """Maneja el cambio de estado del servidor."""
@@ -858,5 +854,74 @@ class NetworkPanel(QWidget):
             
         except Exception as e:
             logger.error(f"Error actualizando tabla de llamadas: {e}")
+
+    def _connect_monitor_signals(self):
+        """Conecta las señales del monitor SIP."""
+        try:
+            if self.sip_monitor:
+                logger.debug("Conectando señales del monitor SIP")
+                # Desconectar señales existentes primero
+                try:
+                    self.sip_monitor.rtt_updated.disconnect()
+                    self.sip_monitor.stats_updated.disconnect()
+                except:
+                    pass
+                
+                # Conectar señales
+                self.sip_monitor.rtt_updated.connect(self._update_latency)
+                self.sip_monitor.stats_updated.connect(self.update_status)
+                logger.debug("Señales del monitor conectadas")
+        except Exception as e:
+            logger.error(f"Error conectando señales del monitor: {e}")
+
+    def _update_latency(self, rtt: float):
+        """Actualiza el indicador de latencia."""
+        try:
+            if rtt > 0:
+                self.latency_value.setText(f"{rtt:.2f} ms")
+                self.led_indicator.setActive(True)
+                logger.debug(f"Latencia actualizada: {rtt:.2f} ms")
+            else:
+                self.latency_value.setText("-- ms")
+                self.led_indicator.setActive(False)
+                logger.debug("LED desactivado - sin latencia")
+        except Exception as e:
+            logger.error(f"Error actualizando latencia: {e}")
+
+    def init_monitor(self):
+        """Inicializa el monitor SIP."""
+        try:
+            # Crear configuración inicial
+            config = {
+                'local_ip': self.local_ip,
+                'local_port': self.local_port,
+                'remote_ip': self.remote_ip,
+                'remote_port': self.remote_port,
+                'transport': self.transport
+            }
+            
+            # Crear y configurar el monitor
+            self.sip_monitor = SIPMonitor()
+            self.sip_monitor.config = config
+            
+            # Crear y configurar el call handler
+            self.call_handler = SIPCallHandler(config)
+            self.call_handler.sip_monitor = self.sip_monitor
+            
+            # Configurar el monitor para usar el call handler
+            self.sip_monitor.call_handler = self.call_handler
+            
+            # Crear y configurar el panel de control de llamadas
+            self.call_control_panel = CallControlPanel(self)
+            self.call_control_panel.set_call_handler(self.call_handler)
+            
+            # Añadir el panel de control al layout
+            self.call_control_container.layout().addWidget(self.call_control_panel)
+            
+            logger.debug(f"Monitor SIP inicializado con config: {config}")
+            logger.debug("Panel de control de llamadas configurado")
+            
+        except Exception as e:
+            logger.error(f"Error inicializando monitor: {e}")
 
               

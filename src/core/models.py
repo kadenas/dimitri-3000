@@ -32,6 +32,7 @@ class SIPCall:
     to_tag: str = None
     cseq: int = 1
     state: str = CallState.INITIAL.value
+    direction: str = 'outbound'
     start_time: datetime = None
     local_rtp_port: int = None
     remote_rtp_port: int = None
